@@ -1,0 +1,68 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Run
+
+```bash
+go build -o codex-proxy .
+./codex-proxy login --device-auth   # authenticate via device code flow
+./codex-proxy serve                 # start proxy on :10531
+./codex-proxy serve --host 0.0.0.0 --port 8080
+./codex-proxy status                # show token state
+./codex-proxy logout                # remove ~/.codex/auth.json
+```
+
+No external dependencies — stdlib only (Go 1.22+, uses log/slog and builtin min). No tests exist yet.
+
+## What This Is
+
+Local HTTP proxy that lets any OpenAI-compatible SDK hit ChatGPT's Codex backend API using the user's ChatGPT subscription (no API credits). The flow:
+
+1. User authenticates via OpenAI Device Code OAuth
+2. Proxy holds/refreshes tokens and listens on `:10531`
+3. Incoming `/v1/chat/completions` requests get translated to Codex `/responses` format and forwarded to `chatgpt.com/backend-api/codex/responses`
+4. Responses get converted back to OpenAI chat completion shape (both streaming SSE and non-streaming)
+
+## Architecture
+
+```
+main.go                  CLI entrypoint, signal handling, graceful shutdown
+auth/auth.go             OAuth, token lifecycle, request body translation
+proxy/proxy.go           HTTP server, format conversion, retry, metrics
+codex-proxy.plist        macOS launchd service definition
+```
+
+- **`main.go`** — Manual arg parsing, dispatches to auth/proxy. Sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh goroutine, and does graceful `server.Shutdown` on signal.
+
+- **`auth/auth.go`** — OAuth device code flow, token persistence (`~/.codex/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. All HTTP calls use a dedicated `httpClient` with 30s timeout (never `http.DefaultClient`).
+
+- **`proxy/proxy.go`** — HTTP server with OpenAI-compatible endpoints. Two HTTP clients: `normalClient` (60s timeout) and `streamClient` (no overall timeout, 30s response header timeout). `callUpstream` handles 401→refresh-and-retry plus 429/5xx→exponential backoff (max 2 retries). Streaming `/v1/chat/completions` converts Codex SSE events (`response.output_text.delta`, `response.completed`) into OpenAI chat completion chunk format. `/v1/responses` does raw SSE passthrough. Request bodies capped at 10MB via `http.MaxBytesReader`.
+
+### Endpoints
+
+| Path | Purpose |
+|------|---------|
+| `/v1/chat/completions` | OpenAI-compatible, converts to/from Codex format |
+| `/v1/responses` | Codex API passthrough |
+| `/v1/models` | Lists available models (discovered at startup) |
+| `/health` | Returns 200/503 based on token state |
+| `/metrics` | JSON counters: requests, errors, retries, uptime |
+
+### Key design details
+
+- `auth.Manager` is a package-level singleton (`*TokenManager`) initialized in `init()`. All token access goes through it.
+- Token file path: `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. Written with 0600 perms.
+- `BuildCodexRequestBody` maps `messages` → `input` and passes through `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `stop`, `tools`, `tool_choice`, `response_format`.
+- `convertToOpenAIFormat` / `extractContent` navigate the Codex response structure (`output[].content[].text`) back into `choices[].message.content`.
+- `logWriter` wraps `http.ResponseWriter` and implements `http.Flusher` so streaming works through the logging middleware.
+- Structured JSON logging (slog) only in `serve` mode; interactive commands use plain fmt.
+
+### Deployment
+
+`codex-proxy.plist` is a launchd user agent. Install with:
+```bash
+go build -o /usr/local/bin/codex-proxy .
+cp codex-proxy.plist ~/Library/LaunchAgents/com.local.codex-proxy.plist
+launchctl load ~/Library/LaunchAgents/com.local.codex-proxy.plist
+```
