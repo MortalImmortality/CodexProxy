@@ -156,14 +156,16 @@ const resp = await client.chat.completions.create({
 | `/v1/chat/completions` | POST | OpenAI 兼容的 Chat Completions API |
 | `/v1/responses` | POST | Codex Responses API 直通 |
 | `/v1/models` | GET | 列出当前账号可用的模型 |
-| `/health` | GET | 健康检查 |
+| `/health` | GET | 健康检查（含 Token 状态，不健康时返回 503） |
+| `/metrics` | GET | 运行指标（请求数、错误数、重试次数、uptime） |
 
 ## Token 管理
 
 - Token 存储在 `~/.codex/auth.json`（与 Codex CLI 共享）
 - 如果你已经通过 `codex login` 登录过，可以直接 `codex-proxy serve`
-- Token 大约 8 天后过期，proxy 会自动 refresh
-- 遇到上游 401 时会自动 refresh-and-retry
+- Token 7 天判定为 stale，5 天时后台 goroutine 主动 refresh（不依赖请求触发）
+- 遇到上游 401 会自动 refresh-and-retry
+- 遇到上游 429/5xx 会指数退避重试（最多 2 次）
 - refresh_token 可能在刷新时被轮换，proxy 会自动更新 auth.json
 
 ## auth.json 结构
@@ -181,32 +183,12 @@ const resp = await client.chat.completions.create({
 }
 ```
 
-## 集成到 hermes-rhyme / 盯盘工具
-
-在你的 Hermes Agent 配置中，设置 LLM provider:
-
-```yaml
-# hermes agent config
-llm:
-  provider: openai
-  base_url: http://127.0.0.1:10531/v1
-  api_key: unused
-  model: o3-pro
-```
-
-Telegram Bot 中:
-```python
-# bot.py
-OPENAI_BASE_URL = "http://127.0.0.1:10531/v1"
-```
-
 ## 安全提醒
 
 - `auth.json` 等同于密码，不要提交到 git 或分享
 - 仅在受信任的本地机器上运行
 - 不要作为多租户公共服务部署
 - 这不是 OpenAI 官方支持的用法，存在被限制的风险
-- Anthropic 已在 2026 年 4 月关闭了 Claude 的等效通道
 
 ## 已知同类项目
 
