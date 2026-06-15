@@ -276,6 +276,16 @@ func loginBrowser() error {
 // ──────────────────────────────────────────────
 
 func (tm *TokenManager) EnsureFreshToken() (string, error) {
+	// Fast path: read lock only when token is loaded and fresh
+	tm.mu.RLock()
+	if tm.authFile != nil && time.Since(tm.authFile.LastRefresh) <= RefreshInterval {
+		token := tm.authFile.Tokens.AccessToken
+		tm.mu.RUnlock()
+		return token, nil
+	}
+	tm.mu.RUnlock()
+
+	// Slow path: need to load or refresh
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
