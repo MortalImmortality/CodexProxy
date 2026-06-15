@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"codex-proxy/auth"
@@ -60,9 +61,26 @@ func main() {
 
 	case "status":
 		auth.ShowStatus()
+		if runtime.GOOS == "linux" {
+			fmt.Println()
+			printServiceStatus()
+		}
 
 	case "logout":
 		auth.Logout()
+
+	case "install":
+		serviceInstall()
+	case "uninstall":
+		serviceUninstall()
+	case "start":
+		serviceStart()
+	case "stop":
+		serviceStop()
+	case "restart":
+		serviceRestart()
+	case "logs":
+		serviceLogs()
 
 	default:
 		printUsage()
@@ -74,16 +92,24 @@ func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
-  codex-proxy login [--device-auth]   Login via Codex OAuth (browser or device code)
-  codex-proxy serve [--host HOST] [--port PORT]   Start API proxy server
-  codex-proxy status                  Show current auth status
-  codex-proxy logout                  Remove stored credentials
+  codex-proxy login [--device-auth]              Login via Codex OAuth
+  codex-proxy serve [--host HOST] [--port PORT]  Start proxy (foreground)
+  codex-proxy status                             Show auth & service status
+  codex-proxy logout                             Remove stored credentials
+
+Service management (Linux):
+  codex-proxy install                            Install systemd user service
+  codex-proxy uninstall                          Remove systemd service
+  codex-proxy start                              Start background service
+  codex-proxy stop                               Stop background service
+  codex-proxy restart                            Restart background service
+  codex-proxy logs                               Tail service logs
 
 After login, any OpenAI-compatible client can use:
   base_url = http://127.0.0.1:10531/v1
 
 Example:
   export OPENAI_BASE_URL=http://127.0.0.1:10531/v1
-  export OPENAI_API_KEY=unused  # any non-empty string
+  export OPENAI_API_KEY=unused
   python -c "from openai import OpenAI; print(OpenAI().chat.completions.create(model='o3-pro', messages=[{'role':'user','content':'hi'}]))"`)
 }

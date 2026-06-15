@@ -7,10 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 go build -o codex-proxy .
 ./codex-proxy login --device-auth   # authenticate via device code flow
-./codex-proxy serve                 # start proxy on :10531
+./codex-proxy serve                 # start proxy on :10531 (foreground)
 ./codex-proxy serve --host 0.0.0.0 --port 8080
-./codex-proxy status                # show token state
+./codex-proxy status                # show auth + service status
 ./codex-proxy logout                # remove ~/.codex/auth.json
+```
+
+Linux one-click install: `./install.sh` (builds, installs to /usr/local/bin, sets up systemd).
+
+Service management (Linux, after install):
+```bash
+codex-proxy install     # set up systemd user service
+codex-proxy start       # start background service
+codex-proxy stop / restart / logs / uninstall
 ```
 
 No external dependencies — stdlib only (Go 1.22+, uses log/slog and builtin min). No tests exist yet.
@@ -28,12 +37,14 @@ Local HTTP proxy that lets any OpenAI-compatible SDK hit ChatGPT's Codex backend
 
 ```
 main.go                  CLI entrypoint, signal handling, graceful shutdown
+service.go               systemd service management (install/start/stop/logs)
 auth/auth.go             OAuth, token lifecycle, request body translation
 proxy/proxy.go           HTTP server, format conversion, retry, metrics
+install.sh               Linux one-click installer
 codex-proxy.plist        macOS launchd service definition
 ```
 
-- **`main.go`** — Manual arg parsing, dispatches to auth/proxy. Sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh goroutine, and does graceful `server.Shutdown` on signal.
+- **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
 
 - **`auth/auth.go`** — OAuth device code flow, token persistence (`~/.codex/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. All HTTP calls use a dedicated `httpClient` with 30s timeout (never `http.DefaultClient`).
 
@@ -60,7 +71,13 @@ codex-proxy.plist        macOS launchd service definition
 
 ### Deployment
 
-`codex-proxy.plist` is a launchd user agent. Install with:
+**Linux** — one-click:
+```bash
+./install.sh   # builds, installs binary, sets up systemd user service
+```
+Or manually: `go build`, copy binary, `codex-proxy install`.
+
+**macOS** — `codex-proxy.plist` is a launchd user agent:
 ```bash
 go build -o /usr/local/bin/codex-proxy .
 cp codex-proxy.plist ~/Library/LaunchAgents/com.local.codex-proxy.plist
