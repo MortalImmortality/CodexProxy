@@ -64,13 +64,13 @@ var stats struct {
 // Serve starts the OpenAI-compatible API proxy
 // ──────────────────────────────────────────────
 
-func Serve(ctx context.Context, host, port string) error {
-	token, err := auth.Manager.EnsureFreshToken()
+func Serve(ctx context.Context, host, port, apiKey string) error {
+	handle, err := auth.Pool.Acquire()
 	if err != nil {
 		return fmt.Errorf("cannot start proxy: %w", err)
 	}
 
-	models, err := auth.DiscoverModels(token)
+	models, err := auth.DiscoverModels(handle.Token)
 	if err != nil {
 		slog.Warn("model discovery failed, using fallback", "error", err)
 		models = []string{"o3-pro", "gpt-5.4", "gpt-5.3-codex", "o4-mini"}
@@ -83,7 +83,7 @@ func Serve(ctx context.Context, host, port string) error {
 	mux.HandleFunc("/v1/models", makeModelsHandler(models))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		healthy, reason := auth.Manager.IsHealthy()
+		healthy, reason := auth.Pool.IsHealthy()
 		w.Header().Set("Content-Type", "application/json")
 		status := "ok"
 		httpCode := 200
@@ -137,14 +137,24 @@ func Serve(ctx context.Context, host, port string) error {
 	fmt.Printf("  │  Models:   %-30s       │\n", strings.Join(models[:min(3, len(models))], ", "))
 	fmt.Printf("  ╰──────────────────────────────────────────────────╯\n")
 	fmt.Println()
+	if apiKey != "" {
+		fmt.Printf("  Auth:     API key required (CODEX_PROXY_API_KEY)\n")
+	} else {
+		fmt.Printf("  Auth:     none (set CODEX_PROXY_API_KEY to enable)\n")
+	}
+	fmt.Println()
 	fmt.Println("  Use with any OpenAI SDK:")
 	fmt.Printf("    export OPENAI_BASE_URL=http://%s/v1\n", addr)
-	fmt.Println("    export OPENAI_API_KEY=unused")
+	if apiKey != "" {
+		fmt.Println("    export OPENAI_API_KEY=<your CODEX_PROXY_API_KEY>")
+	} else {
+		fmt.Println("    export OPENAI_API_KEY=unused")
+	}
 	fmt.Println()
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withLogging(withCORS(mux)),
+		Handler:      withLogging(withCORS(withAuth(apiKey, mux))),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  120 * time.Second,
@@ -175,11 +185,12 @@ func Serve(ctx context.Context, host, port string) error {
 // Upstream call with retry (401 refresh + 429/5xx backoff)
 // ──────────────────────────────────────────────
 
-func callUpstream(upstreamURL string, body []byte, isStreaming bool) (*http.Response, error) {
-	token, err := auth.Manager.EnsureFreshToken()
+func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStreaming bool) (*http.Response, error) {
+	handle, err := auth.Pool.Acquire()
 	if err != nil {
 		return nil, err
 	}
+	token := handle.Token
 
 	client := normalClient
 	if isStreaming {
@@ -190,7 +201,7 @@ func callUpstream(upstreamURL string, body []byte, isStreaming bool) (*http.Resp
 	var resp *http.Response
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, _ := http.NewRequest("POST", upstreamURL, bytes.NewReader(body))
+		req, _ := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "codex-proxy/1.0")
@@ -203,11 +214,17 @@ func callUpstream(upstreamURL string, body []byte, isStreaming bool) (*http.Resp
 		switch {
 		case resp.StatusCode == 401 && !refreshed:
 			resp.Body.Close()
-			slog.Warn("upstream 401, refreshing token")
+			slog.Warn("upstream 401, refreshing token",
+				"account", handle.Manager.Name())
 			stats.tokenRefreshes.Add(1)
-			token, err = auth.Manager.RefreshNow()
+			token, err = handle.Refresh()
 			if err != nil {
-				return nil, fmt.Errorf("token refresh: %w", err)
+				handle2, err2 := auth.Pool.Acquire()
+				if err2 != nil {
+					return nil, fmt.Errorf("refresh failed: %w; fallback: %w", err, err2)
+				}
+				handle = handle2
+				token = handle.Token
 			}
 			refreshed = true
 			stats.retries.Add(1)
@@ -222,7 +239,11 @@ func callUpstream(upstreamURL string, body []byte, isStreaming bool) (*http.Resp
 					"delay", delay)
 				resp.Body.Close()
 				stats.retries.Add(1)
-				time.Sleep(delay)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(delay):
+				}
 				continue
 			}
 			return resp, nil
@@ -286,7 +307,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := callUpstream(upstreamBase+"/responses", codexBody, isStreaming)
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, isStreaming)
 	if err != nil {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
@@ -342,7 +363,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		isStreaming, _ = reqMap["stream"].(bool)
 	}
 
-	resp, err := callUpstream(upstreamBase+"/responses", body, isStreaming)
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", body, isStreaming)
 	if err != nil {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
@@ -468,7 +489,9 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 			}
 			chunk := buildStreamChunk(respID, model, created, firstContent, delta.Delta, "")
 			firstContent = false
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+				return
+			}
 			flusher.Flush()
 
 		case "response.completed", "response.done":
@@ -534,7 +557,9 @@ func streamPassthrough(w http.ResponseWriter, resp *http.Response) {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n])
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				break
+			}
 			flusher.Flush()
 		}
 		if err != nil {
@@ -620,6 +645,35 @@ func extractContent(resp map[string]interface{}) string {
 // ──────────────────────────────────────────────
 // Middleware
 // ──────────────────────────────────────────────
+
+func withAuth(apiKey string, next http.Handler) http.Handler {
+	if apiKey == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "OPTIONS" ||
+			r.URL.Path == "/health" ||
+			r.URL.Path == "/metrics" ||
+			r.URL.Path == "/" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := ""
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			key = strings.TrimPrefix(h, "Bearer ")
+		}
+		if key == "" {
+			key = r.Header.Get("X-API-Key")
+		}
+
+		if key != apiKey {
+			writeError(w, 401, "unauthorized", "invalid or missing API key")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

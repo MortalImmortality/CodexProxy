@@ -1,0 +1,15 @@
+{
+  "accounts": [
+    {
+      "name": "main",
+      "auth_file": "~/.codex/auth.json"
+    },
+    {
+      "name": "alt",
+      "auth_file": "~/.codex/auth-alt.json"
+    }
+  ],
+  "strategy": "round-robin",
+  "host": "127.0.0.1",
+  "port": "10531"
+}

@@ -1,0 +1,6 @@
+codex-proxy
+codex-proxy-*
+*.exe
+auth.json
+auth-*.json
+proxy.json

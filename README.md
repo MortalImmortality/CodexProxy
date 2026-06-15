@@ -183,6 +183,42 @@ const resp = await client.chat.completions.create({
 }
 ```
 
+## 多账号负载均衡
+
+支持多个 ChatGPT 账号轮流使用，分散请求压力。
+
+### 1. 为每个账号登录
+
+```bash
+codex-proxy login --device-auth                                    # 主账号
+codex-proxy login --device-auth --auth-file ~/.codex/auth-alt.json # 副账号
+```
+
+### 2. 创建配置文件 `~/.codex/proxy.json`
+
+```json
+{
+  "accounts": [
+    {"name": "main", "auth_file": "~/.codex/auth.json"},
+    {"name": "alt",  "auth_file": "~/.codex/auth-alt.json"}
+  ],
+  "strategy": "round-robin"
+}
+```
+
+`strategy` 可选 `round-robin`（轮询）或 `random`（随机）。
+
+### 3. 启动
+
+```bash
+codex-proxy serve                        # 自动检测 ~/.codex/proxy.json
+codex-proxy serve --config /path/to.json # 指定配置文件
+```
+
+- 某账号 401 失败时自动切换到其他健康账号
+- 故障账号 5 分钟后自动重试恢复
+- `/health` 和 `codex-proxy status` 显示所有账号状态
+
 ## 安全提醒
 
 - `auth.json` 等同于密码，不要提交到 git 或分享

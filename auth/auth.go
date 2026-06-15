@@ -76,15 +76,64 @@ type TokenManager struct {
 	mu       sync.RWMutex
 	authFile *AuthFile
 	filePath string
+	name     string
 	cancel   context.CancelFunc
+
+	failMu    sync.RWMutex
+	lastError error
+	failedAt  time.Time
 }
 
 var Manager *TokenManager
 
 func init() {
 	Manager = &TokenManager{
+		name:     "default",
 		filePath: defaultAuthPath(),
 	}
+}
+
+func NewTokenManager(name, filePath string) *TokenManager {
+	return &TokenManager{
+		name:     name,
+		filePath: filePath,
+	}
+}
+
+func (tm *TokenManager) Name() string     { return tm.name }
+func (tm *TokenManager) FilePath() string  { return tm.filePath }
+
+func (tm *TokenManager) MarkFailed(err error) {
+	tm.failMu.Lock()
+	defer tm.failMu.Unlock()
+	tm.lastError = err
+	tm.failedAt = time.Now()
+	slog.Warn("account marked failed", "account", tm.name, "error", err)
+}
+
+func (tm *TokenManager) ClearFailed() {
+	tm.failMu.Lock()
+	defer tm.failMu.Unlock()
+	tm.lastError = nil
+	tm.failedAt = time.Time{}
+}
+
+func (tm *TokenManager) IsFailed() bool {
+	tm.failMu.RLock()
+	defer tm.failMu.RUnlock()
+	if tm.lastError == nil {
+		return false
+	}
+	// Auto-clear after 5 minutes
+	return time.Since(tm.failedAt) <= 5*time.Minute
+}
+
+func DefaultAuthPath() string {
+	return defaultAuthPath()
+}
+
+func SetManagerPath(path string) {
+	Manager.filePath = path
 }
 
 func defaultAuthPath() string {
@@ -221,7 +270,7 @@ func loginDeviceCode() error {
 				},
 				LastRefresh: time.Now(),
 			}
-			if err := saveAuthFile(authFile); err != nil {
+			if err := saveAuthFile(authFile, Manager.filePath); err != nil {
 				return err
 			}
 			Manager.mu.Lock()
@@ -356,7 +405,7 @@ func (tm *TokenManager) refreshLocked() error {
 	tm.authFile.LastRefresh = time.Now()
 
 	slog.Info("token refreshed successfully")
-	return saveAuthFile(tm.authFile)
+	return saveAuthFile(tm.authFile, tm.filePath)
 }
 
 func (tm *TokenManager) GetAccessToken() string {
@@ -384,8 +433,7 @@ func loadAuthFile(path string) (*AuthFile, error) {
 	return &af, nil
 }
 
-func saveAuthFile(af *AuthFile) error {
-	path := Manager.filePath
+func saveAuthFile(af *AuthFile, path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -427,6 +475,28 @@ func ShowStatus() {
 	} else {
 		fmt.Println("  ✓ Token is fresh")
 	}
+}
+
+func ShowStatusForFile(name, path string) {
+	af, err := loadAuthFile(path)
+	if err != nil {
+		fmt.Printf("    ✗ Not logged in (%s)\n", path)
+		return
+	}
+
+	tokenPreview := af.Tokens.AccessToken
+	if len(tokenPreview) > 20 {
+		tokenPreview = tokenPreview[:10] + "..." + tokenPreview[len(tokenPreview)-6:]
+	}
+
+	staleness := time.Since(af.LastRefresh).Round(time.Minute)
+	status := "✓ fresh"
+	if time.Since(af.LastRefresh) > RefreshInterval {
+		status = "⚠ stale"
+	}
+
+	fmt.Printf("    %s  token:%s  staleness:%s  refresh:%v\n",
+		status, tokenPreview, staleness, af.Tokens.RefreshToken != "")
 }
 
 func Logout() {

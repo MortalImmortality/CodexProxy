@@ -22,10 +22,20 @@ func main() {
 	switch os.Args[1] {
 	case "login":
 		deviceAuth := false
-		for _, arg := range os.Args[2:] {
-			if arg == "--device-auth" {
+		authFile := ""
+		for i := 2; i < len(os.Args); i++ {
+			switch os.Args[i] {
+			case "--device-auth":
 				deviceAuth = true
+			case "--auth-file":
+				if i+1 < len(os.Args) {
+					authFile = os.Args[i+1]
+					i++
+				}
 			}
+		}
+		if authFile != "" {
+			auth.SetManagerPath(expandHome(authFile))
 		}
 		if err := auth.Login(deviceAuth); err != nil {
 			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
@@ -39,28 +49,51 @@ func main() {
 
 		host := "127.0.0.1"
 		port := "10531"
-		for i := 2; i < len(os.Args)-1; i++ {
+		configPath := ""
+
+		for i := 2; i < len(os.Args); i++ {
+			if i+1 >= len(os.Args) {
+				break
+			}
 			switch os.Args[i] {
 			case "--host":
 				host = os.Args[i+1]
+				i++
 			case "--port":
 				port = os.Args[i+1]
+				i++
+			case "--config":
+				configPath = os.Args[i+1]
+				i++
 			}
 		}
+
+		initPool(configPath, &host, &port)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		auth.Manager.StartBackgroundRefresh(ctx)
-		defer auth.Manager.Stop()
+		auth.Pool.StartBackgroundRefresh(ctx)
+		defer auth.Pool.Stop()
 
-		if err := proxy.Serve(ctx, host, port); err != nil {
+		apiKey := os.Getenv("CODEX_PROXY_API_KEY")
+		if err := proxy.Serve(ctx, host, port, apiKey); err != nil {
 			slog.Error("proxy server stopped", "error", err)
 			os.Exit(1)
 		}
 
 	case "status":
-		auth.ShowStatus()
+		cfg, err := loadConfig(defaultConfigPath())
+		if err != nil {
+			auth.ShowStatus()
+		} else {
+			fmt.Printf("  Strategy:  %s\n", cfg.Strategy)
+			fmt.Printf("  Accounts:  %d\n\n", len(cfg.Accounts))
+			for _, acc := range cfg.Accounts {
+				fmt.Printf("  [%s] %s\n", acc.Name, acc.AuthFile)
+				auth.ShowStatusForFile(acc.Name, expandHome(acc.AuthFile))
+			}
+		}
 		if runtime.GOOS == "linux" {
 			fmt.Println()
 			printServiceStatus()
@@ -88,22 +121,58 @@ func main() {
 	}
 }
 
+func initPool(configPath string, host, port *string) {
+	if configPath == "" {
+		configPath = defaultConfigPath()
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		auth.Pool = auth.NewTokenPool(
+			[]auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}},
+			"round-robin",
+		)
+		slog.Info("single-account mode", "auth_file", auth.DefaultAuthPath())
+		return
+	}
+
+	if cfg.Host != "" {
+		*host = cfg.Host
+	}
+	if cfg.Port != "" {
+		*port = cfg.Port
+	}
+	strategy := cfg.Strategy
+	if strategy == "" {
+		strategy = "round-robin"
+	}
+
+	auth.Pool = auth.NewTokenPool(configToAccountConfigs(cfg), strategy)
+	slog.Info("multi-account mode",
+		"accounts", len(cfg.Accounts),
+		"strategy", strategy)
+}
+
 func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
-  codex-proxy login [--device-auth]              Login via Codex OAuth
-  codex-proxy serve [--host HOST] [--port PORT]  Start proxy (foreground)
-  codex-proxy status                             Show auth & service status
-  codex-proxy logout                             Remove stored credentials
+  codex-proxy login [--device-auth] [--auth-file PATH]  Login via Codex OAuth
+  codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
+  codex-proxy status                                     Show auth & service status
+  codex-proxy logout                                     Remove stored credentials
 
 Service management (Linux):
-  codex-proxy install                            Install systemd user service
-  codex-proxy uninstall                          Remove systemd service
-  codex-proxy start                              Start background service
-  codex-proxy stop                               Stop background service
-  codex-proxy restart                            Restart background service
-  codex-proxy logs                               Tail service logs
+  codex-proxy install                  Install systemd user service
+  codex-proxy uninstall                Remove systemd service
+  codex-proxy start                    Start background service
+  codex-proxy stop                     Stop background service
+  codex-proxy restart                  Restart background service
+  codex-proxy logs                     Tail service logs
+
+Multi-account:
+  Create ~/.codex/proxy.json with multiple accounts for load balancing.
+  See proxy.example.json for format.
 
 After login, any OpenAI-compatible client can use:
   base_url = http://127.0.0.1:10531/v1
