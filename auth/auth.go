@@ -608,6 +608,7 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 						instructions = append(instructions, content)
 					}
 				} else {
+					convertContentTypes(msg)
 					input = append(input, msg)
 				}
 			}
@@ -635,4 +636,33 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	}
 
 	return json.Marshal(codexReq)
+}
+
+func convertContentTypes(msg map[string]interface{}) {
+	role, _ := msg["role"].(string)
+	content, ok := msg["content"]
+	if !ok {
+		return
+	}
+	parts, ok := content.([]interface{})
+	if !ok {
+		return
+	}
+	for _, p := range parts {
+		part, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		t, _ := part["type"].(string)
+		switch t {
+		case "text":
+			if role == "assistant" {
+				part["type"] = "output_text"
+			} else {
+				part["type"] = "input_text"
+			}
+		case "image_url":
+			part["type"] = "input_image"
+		}
+	}
 }
