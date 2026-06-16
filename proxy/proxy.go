@@ -375,15 +375,17 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "bad_request", "prompt is required")
 		return
 	}
-	if req.Model == "" {
-		req.Model = "gpt-image-1"
+	imageModel := req.Model
+	if imageModel == "" {
+		imageModel = "gpt-image-1"
 	}
 	if req.N == 0 {
 		req.N = 1
 	}
 
 	imageTool := map[string]interface{}{
-		"type": "image_generation",
+		"type":  "image_generation",
+		"model": imageModel,
 	}
 	if req.Size != "" {
 		imageTool["size"] = req.Size
@@ -401,7 +403,7 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	imageTool["output_format"] = outputFormat
 
 	codexReq := map[string]interface{}{
-		"model":       req.Model,
+		"model":       "gpt-4o",
 		"stream":      true,
 		"store":       false,
 		"tool_choice": "image_generation",
