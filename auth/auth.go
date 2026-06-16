@@ -31,15 +31,33 @@ const (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-func authPostForm(endpoint string, data url.Values) (*http.Response, error) {
-	req, err := http.NewRequest("POST", endpoint, strings.NewReader(data.Encode()))
+func curlPostForm(endpoint string, data url.Values) ([]byte, int, error) {
+	curlPath, err := exec.LookPath("curl")
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("curl not found: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("User-Agent", "codex-proxy/1.0")
-	req.Header.Set("Accept", "application/json")
-	return httpClient.Do(req)
+	cmd := exec.Command(curlPath,
+		"-s", "-w", "\n%{http_code}",
+		"-X", "POST",
+		"-H", "Content-Type: application/x-www-form-urlencoded",
+		"-H", "Accept: application/json",
+		"--data", data.Encode(),
+		endpoint,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("curl failed: %w", err)
+	}
+	// Last line is HTTP status code
+	parts := strings.SplitN(string(out), "\n", -1)
+	if len(parts) < 2 {
+		return nil, 0, fmt.Errorf("unexpected curl output")
+	}
+	statusStr := strings.TrimSpace(parts[len(parts)-1])
+	body := strings.Join(parts[:len(parts)-1], "\n")
+	var status int
+	fmt.Sscanf(statusStr, "%d", &status)
+	return []byte(body), status, nil
 }
 
 // ──────────────────────────────────────────────
@@ -228,22 +246,20 @@ func Login(deviceAuth bool) error {
 func loginDeviceCode() error {
 	fmt.Println("Requesting device code from OpenAI...")
 
-	resp, err := authPostForm(OAuthDeviceURL, url.Values{
+	body, status, err := curlPostForm(OAuthDeviceURL, url.Values{
 		"client_id": {OAuthClientID},
 		"scope":     {"openid profile email offline_access"},
 	})
 	if err != nil {
 		return fmt.Errorf("device code request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("device code request returned %d: %s", resp.StatusCode, body)
+	if status != 200 {
+		return fmt.Errorf("device code request returned %d: %s", status, body)
 	}
 
 	var dc DeviceCodeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&dc); err != nil {
+	if err := json.Unmarshal(body, &dc); err != nil {
 		return fmt.Errorf("failed to parse device code response: %w", err)
 	}
 
@@ -309,7 +325,7 @@ func loginDeviceCode() error {
 }
 
 func pollDeviceToken(deviceCode string) (*TokenResponse, error) {
-	resp, err := authPostForm(OAuthTokenURL, url.Values{
+	body, _, err := curlPostForm(OAuthTokenURL, url.Values{
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"device_code": {deviceCode},
 		"client_id":   {OAuthClientID},
@@ -317,10 +333,9 @@ func pollDeviceToken(deviceCode string) (*TokenResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("token poll failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	var tr TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+	if err := json.Unmarshal(body, &tr); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 	return &tr, nil
@@ -387,7 +402,7 @@ func (tm *TokenManager) refreshLocked() error {
 		return fmt.Errorf("no refresh token available")
 	}
 
-	resp, err := authPostForm(OAuthTokenURL, url.Values{
+	body, status, err := curlPostForm(OAuthTokenURL, url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {tm.authFile.Tokens.RefreshToken},
 		"client_id":     {OAuthClientID},
@@ -395,15 +410,13 @@ func (tm *TokenManager) refreshLocked() error {
 	if err != nil {
 		return fmt.Errorf("refresh request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("refresh returned %d: %s", resp.StatusCode, body)
+	if status != 200 {
+		return fmt.Errorf("refresh returned %d: %s", status, body)
 	}
 
 	var tr TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+	if err := json.Unmarshal(body, &tr); err != nil {
 		return fmt.Errorf("failed to parse refresh response: %w", err)
 	}
 
