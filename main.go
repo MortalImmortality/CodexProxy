@@ -285,9 +285,9 @@ API key management:
   codex-proxy key list                                   List all API keys
   codex-proxy key delete <key-or-name>                   Delete an API key
 
-Service management (Linux):
-  codex-proxy install                  Install systemd user service
-  codex-proxy uninstall                Remove systemd service
+Service management:
+  codex-proxy install                  Install user service (systemd/launchd)
+  codex-proxy uninstall                Remove user service
   codex-proxy start                    Start background service
   codex-proxy stop                     Stop background service
   codex-proxy restart                  Restart background service

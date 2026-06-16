@@ -218,10 +218,12 @@ codex-proxy key add [--name N] [--key K]           # 添加 API key
 codex-proxy key list                               # 列出 API key
 codex-proxy key delete <key-or-name>               # 删除 API key
 
-codex-proxy install                                # 安装 systemd 服务
+codex-proxy install                                # 安装用户服务（Linux systemd / macOS launchd）
 codex-proxy start / stop / restart / logs          # 服务管理
 codex-proxy uninstall                              # 卸载服务
 ```
+
+macOS 下 `codex-proxy install` 会为当前用户生成 `~/Library/LaunchAgents/com.local.codex-proxy.plist`，自动写入当前 HOME、二进制路径和日志路径。
 
 ## Token 管理
 

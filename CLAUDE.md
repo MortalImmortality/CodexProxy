@@ -15,9 +15,9 @@ go build -o codex-proxy .
 
 Linux one-click install: `./install.sh` (builds, installs to /usr/local/bin, sets up systemd).
 
-Service management (Linux, after install):
+Service management (Linux/macOS, after install):
 ```bash
-codex-proxy install     # set up systemd user service
+codex-proxy install     # set up systemd/launchd user service
 codex-proxy start       # start background service
 codex-proxy stop / restart / logs / uninstall
 ```
@@ -41,7 +41,7 @@ service.go               systemd service management (install/start/stop/logs)
 auth/auth.go             OAuth, token lifecycle, request body translation
 proxy/proxy.go           HTTP server, format conversion, retry, metrics
 install.sh               Linux one-click installer
-codex-proxy.plist        macOS launchd service definition
+codex-proxy.plist        macOS launchd template; install command generates the real file
 ```
 
 - **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
@@ -77,9 +77,9 @@ codex-proxy.plist        macOS launchd service definition
 ```
 Or manually: `go build`, copy binary, `codex-proxy install`.
 
-**macOS** — `codex-proxy.plist` is a launchd user agent:
+**macOS** — `codex-proxy install` generates a launchd user agent:
 ```bash
 go build -o /usr/local/bin/codex-proxy .
-cp codex-proxy.plist ~/Library/LaunchAgents/com.local.codex-proxy.plist
-launchctl load ~/Library/LaunchAgents/com.local.codex-proxy.plist
+codex-proxy install
+codex-proxy start
 ```

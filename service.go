@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,14 +10,21 @@ import (
 )
 
 const serviceName = "codex-proxy"
+const launchdLabel = "com.local.codex-proxy"
 
 func serviceInstall() {
-	if runtime.GOOS != "linux" {
-		fmt.Println("Service install is Linux-only (systemd).")
-		fmt.Println("For macOS, see codex-proxy.plist with launchctl.")
+	switch runtime.GOOS {
+	case "linux":
+		serviceInstallSystemd()
+	case "darwin":
+		serviceInstallLaunchd()
+	default:
+		fmt.Println("Service install is supported on Linux (systemd) and macOS (launchd).")
 		os.Exit(1)
 	}
+}
 
+func serviceInstallSystemd() {
 	execPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot determine binary path: %v\n", err)
@@ -61,14 +69,47 @@ WantedBy=default.target
 	if user := os.Getenv("USER"); user != "" {
 		cmd := exec.Command("loginctl", "enable-linger", user)
 		if err := cmd.Run(); err != nil {
-			fmt.Println("  ⚠ Lingering not enabled (run: sudo loginctl enable-linger $USER)")
+			fmt.Println("  Warning: lingering not enabled (run: sudo loginctl enable-linger $USER)")
 			fmt.Println("    Without lingering, service stops when you log out.")
 		} else {
-			fmt.Println("  ✓ Lingering enabled")
+			fmt.Println("  Lingering enabled")
 		}
 	}
 
-	fmt.Println("  ✓ Service installed and enabled")
+	fmt.Println("  Service installed and enabled")
+	fmt.Println()
+	fmt.Println("  Next:")
+	fmt.Println("    codex-proxy login")
+	fmt.Println("    codex-proxy start")
+}
+
+func serviceInstallLaunchd() {
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot determine binary path: %v\n", err)
+		os.Exit(1)
+	}
+	execPath, _ = filepath.EvalSymlinks(execPath)
+
+	homeDir, _ := os.UserHomeDir()
+	agentDir := filepath.Join(homeDir, "Library", "LaunchAgents")
+	plistPath := launchAgentPath()
+	logPath := launchdLogPath()
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot create %s: %v\n", agentDir, err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot create log directory: %v\n", err)
+		os.Exit(1)
+	}
+	plist := buildLaunchdPlist(execPath, homeDir, logPath)
+	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot write plist file: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("  LaunchAgent: %s\n", plistPath)
+	fmt.Println("  Service installed")
 	fmt.Println()
 	fmt.Println("  Next:")
 	fmt.Println("    codex-proxy login")
@@ -76,8 +117,18 @@ WantedBy=default.target
 }
 
 func serviceUninstall() {
-	requireLinux()
+	switch runtime.GOOS {
+	case "linux":
+		serviceUninstallSystemd()
+	case "darwin":
+		serviceUninstallLaunchd()
+	default:
+		fmt.Println("This command is supported on Linux and macOS.")
+		os.Exit(1)
+	}
+}
 
+func serviceUninstallSystemd() {
 	if err := runSystemctl("stop", serviceName); err != nil {
 		fmt.Fprintf(os.Stderr, "  Warning: cannot stop service: %v\n", err)
 	}
@@ -96,37 +147,85 @@ func serviceUninstall() {
 	mustRunSystemctl("daemon-reload")
 
 	execPath, _ := os.Executable()
-	fmt.Println("  ✓ Service uninstalled")
-	fmt.Printf("  Binary still at %s — remove manually if desired\n", execPath)
+	fmt.Println("  Service uninstalled")
+	fmt.Printf("  Binary still at %s; remove manually if desired\n", execPath)
+}
+
+func serviceUninstallLaunchd() {
+	plistPath := launchAgentPath()
+	if err := runLaunchctl("unload", plistPath); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: cannot unload service: %v\n", err)
+	}
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "  Cannot remove plist file: %v\n", err)
+	} else {
+		fmt.Printf("  Removed %s\n", plistPath)
+	}
+	fmt.Println("  Service uninstalled")
 }
 
 func serviceStart() {
-	requireLinux()
-	requireInstalled()
-	mustRunSystemctl("start", serviceName)
-	fmt.Println("  ✓ Started")
+	switch runtime.GOOS {
+	case "linux":
+		requireInstalled()
+		mustRunSystemctl("start", serviceName)
+	case "darwin":
+		requireLaunchAgentInstalled()
+		mustRunLaunchctl("load", "-w", launchAgentPath())
+	default:
+		fmt.Println("This command is supported on Linux and macOS.")
+		os.Exit(1)
+	}
+	fmt.Println("  Started")
 	fmt.Println()
 	printServiceStatus()
 }
 
 func serviceStop() {
-	requireLinux()
-	mustRunSystemctl("stop", serviceName)
-	fmt.Println("  ✓ Stopped")
+	switch runtime.GOOS {
+	case "linux":
+		mustRunSystemctl("stop", serviceName)
+	case "darwin":
+		requireLaunchAgentInstalled()
+		mustRunLaunchctl("unload", "-w", launchAgentPath())
+	default:
+		fmt.Println("This command is supported on Linux and macOS.")
+		os.Exit(1)
+	}
+	fmt.Println("  Stopped")
 }
 
 func serviceRestart() {
-	requireLinux()
-	requireInstalled()
-	mustRunSystemctl("restart", serviceName)
-	fmt.Println("  ✓ Restarted")
+	switch runtime.GOOS {
+	case "linux":
+		requireInstalled()
+		mustRunSystemctl("restart", serviceName)
+	case "darwin":
+		requireLaunchAgentInstalled()
+		if err := runLaunchctl("unload", "-w", launchAgentPath()); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: cannot unload service: %v\n", err)
+		}
+		mustRunLaunchctl("load", "-w", launchAgentPath())
+	default:
+		fmt.Println("This command is supported on Linux and macOS.")
+		os.Exit(1)
+	}
+	fmt.Println("  Restarted")
 	fmt.Println()
 	printServiceStatus()
 }
 
 func serviceLogs() {
-	requireLinux()
-	cmd := exec.Command("journalctl", "--user", "-u", serviceName, "-f", "--no-pager", "-o", "cat")
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("journalctl", "--user", "-u", serviceName, "-f", "--no-pager", "-o", "cat")
+	case "darwin":
+		cmd = exec.Command("tail", "-f", launchdLogPath())
+	default:
+		fmt.Println("This command is supported on Linux and macOS.")
+		os.Exit(1)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	_ = cmd.Run()
@@ -144,6 +243,62 @@ func printServiceStatus() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	_ = cmd.Run()
+}
+
+func launchAgentPath() string {
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, "Library", "LaunchAgents", launchdLabel+".plist")
+}
+
+func launchdLogPath() string {
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".codex-proxy", "codex-proxy.log")
+}
+
+func buildLaunchdPlist(execPath, homeDir, logPath string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>%s</string>
+        <string>serve</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>%s</string>
+    <key>StandardErrorPath</key>
+    <string>%s</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>%s</string>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+`, html.EscapeString(launchdLabel), html.EscapeString(execPath), html.EscapeString(logPath), html.EscapeString(logPath), html.EscapeString(homeDir))
+}
+
+func runLaunchctl(args ...string) error {
+	cmd := exec.Command("launchctl", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func mustRunLaunchctl(args ...string) {
+	if err := runLaunchctl(args...); err != nil {
+		fmt.Fprintf(os.Stderr, "launchctl %v failed: %v\n", args, err)
+		os.Exit(1)
+	}
 }
 
 func runSystemctl(args ...string) error {
@@ -177,6 +332,13 @@ func requireLinux() {
 
 func requireInstalled() {
 	if !unitFileExists() {
+		fmt.Println("Service not installed. Run: codex-proxy install")
+		os.Exit(1)
+	}
+}
+
+func requireLaunchAgentInstalled() {
+	if _, err := os.Stat(launchAgentPath()); err != nil {
 		fmt.Println("Service not installed. Run: codex-proxy install")
 		os.Exit(1)
 	}

@@ -1,18 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd service definition for codex-proxy.
+  Template launchd service definition for codex-proxy.
 
-  Install:
-    cp codex-proxy.plist ~/Library/LaunchAgents/com.local.codex-proxy.plist
-    launchctl load ~/Library/LaunchAgents/com.local.codex-proxy.plist
+  Prefer:
+    codex-proxy install
 
-  Uninstall:
-    launchctl unload ~/Library/LaunchAgents/com.local.codex-proxy.plist
-    rm ~/Library/LaunchAgents/com.local.codex-proxy.plist
-
-  Logs:
-    tail -f /usr/local/var/log/codex-proxy.log
+  The install command generates ~/Library/LaunchAgents/com.local.codex-proxy.plist
+  with the current user's HOME, binary path, and log path.
 -->
 <plist version="1.0">
 <dict>
@@ -20,7 +15,7 @@
     <string>com.local.codex-proxy</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/codex-proxy</string>
+        <string>__CODEX_PROXY_BIN__</string>
         <string>serve</string>
     </array>
     <key>KeepAlive</key>
@@ -28,13 +23,13 @@
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/usr/local/var/log/codex-proxy.log</string>
+    <string>__CODEX_PROXY_LOG__</string>
     <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/codex-proxy.log</string>
+    <string>__CODEX_PROXY_LOG__</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>/Users/peter</string>
+        <string>__CODEX_PROXY_HOME__</string>
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
