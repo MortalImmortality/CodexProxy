@@ -593,7 +593,35 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	}
 
 	if messages, ok := chatReq["messages"]; ok {
-		codexReq["input"] = messages
+		if msgList, ok := messages.([]interface{}); ok {
+			var instructions []string
+			var input []interface{}
+			for _, m := range msgList {
+				msg, ok := m.(map[string]interface{})
+				if !ok {
+					input = append(input, m)
+					continue
+				}
+				if msg["role"] == "system" {
+					if content, ok := msg["content"].(string); ok {
+						instructions = append(instructions, content)
+					}
+				} else {
+					input = append(input, msg)
+				}
+			}
+			if len(instructions) > 0 {
+				codexReq["instructions"] = strings.Join(instructions, "\n")
+			} else {
+				codexReq["instructions"] = "You are a helpful assistant."
+			}
+			codexReq["input"] = input
+		} else {
+			codexReq["input"] = messages
+			codexReq["instructions"] = "You are a helpful assistant."
+		}
+	} else {
+		codexReq["instructions"] = "You are a helpful assistant."
 	}
 
 	for _, key := range []string{
