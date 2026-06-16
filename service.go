@@ -55,8 +55,8 @@ WantedBy=default.target
 	}
 	fmt.Printf("  Unit file: %s\n", unitPath)
 
-	runSystemctl("daemon-reload")
-	runSystemctl("enable", serviceName)
+	mustRunSystemctl("daemon-reload")
+	mustRunSystemctl("enable", serviceName)
 
 	if user := os.Getenv("USER"); user != "" {
 		cmd := exec.Command("loginctl", "enable-linger", user)
@@ -78,8 +78,12 @@ WantedBy=default.target
 func serviceUninstall() {
 	requireLinux()
 
-	runSystemctl("stop", serviceName)
-	runSystemctl("disable", serviceName)
+	if err := runSystemctl("stop", serviceName); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: cannot stop service: %v\n", err)
+	}
+	if err := runSystemctl("disable", serviceName); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: cannot disable service: %v\n", err)
+	}
 
 	homeDir, _ := os.UserHomeDir()
 	unitPath := filepath.Join(homeDir, ".config", "systemd", "user", serviceName+".service")
@@ -89,7 +93,7 @@ func serviceUninstall() {
 		fmt.Printf("  Removed %s\n", unitPath)
 	}
 
-	runSystemctl("daemon-reload")
+	mustRunSystemctl("daemon-reload")
 
 	execPath, _ := os.Executable()
 	fmt.Println("  ✓ Service uninstalled")
@@ -99,7 +103,7 @@ func serviceUninstall() {
 func serviceStart() {
 	requireLinux()
 	requireInstalled()
-	runSystemctl("start", serviceName)
+	mustRunSystemctl("start", serviceName)
 	fmt.Println("  ✓ Started")
 	fmt.Println()
 	printServiceStatus()
@@ -107,14 +111,14 @@ func serviceStart() {
 
 func serviceStop() {
 	requireLinux()
-	runSystemctl("stop", serviceName)
+	mustRunSystemctl("stop", serviceName)
 	fmt.Println("  ✓ Stopped")
 }
 
 func serviceRestart() {
 	requireLinux()
 	requireInstalled()
-	runSystemctl("restart", serviceName)
+	mustRunSystemctl("restart", serviceName)
 	fmt.Println("  ✓ Restarted")
 	fmt.Println()
 	printServiceStatus()
@@ -142,12 +146,19 @@ func printServiceStatus() {
 	_ = cmd.Run()
 }
 
-func runSystemctl(args ...string) {
+func runSystemctl(args ...string) error {
 	allArgs := append([]string{"--user"}, args...)
 	cmd := exec.Command("systemctl", allArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	return cmd.Run()
+}
+
+func mustRunSystemctl(args ...string) {
+	if err := runSystemctl(args...); err != nil {
+		fmt.Fprintf(os.Stderr, "systemctl --user %v failed: %v\n", args, err)
+		os.Exit(1)
+	}
 }
 
 func unitFileExists() bool {
