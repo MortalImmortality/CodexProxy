@@ -547,7 +547,7 @@ func openBrowser(url string) {
 }
 
 func DiscoverModels(accessToken string) ([]string, error) {
-	req, _ := http.NewRequest("GET", CodexBaseURL+"/models", nil)
+	req, _ := http.NewRequest("GET", CodexBaseURL+"/models?client_version=1.0.0", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "codex-proxy/1.0")
