@@ -957,7 +957,18 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		isStreaming, _ = reqMap["stream"].(bool)
 	}
 
-	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", body, isStreaming)
+	upstreamBody := body
+	if !isStreaming && reqMap != nil {
+		reqMap["stream"] = true
+		upstreamBody, err = json.Marshal(reqMap)
+		if err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 500, "internal", "failed to build upstream request")
+			return
+		}
+	}
+
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", upstreamBody, true)
 	if err != nil {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
@@ -976,13 +987,22 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ct := resp.Header.Get("Content-Type")
-	if strings.Contains(ct, "text/event-stream") {
-		streamPassthrough(w, resp)
+	if !isStreaming {
+		respObj, err := aggregateCodexResponse(resp.Body)
+		if err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 502, "upstream_error", err.Error())
+			return
+		}
+		if respObj == nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 502, "upstream_error", "no response from upstream")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(respObj)
 	} else {
-		w.Header().Set("Content-Type", ct)
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		streamPassthrough(w, resp)
 	}
 }
 
