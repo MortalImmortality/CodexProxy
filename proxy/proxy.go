@@ -438,6 +438,8 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 	created := time.Now().Unix()
 	respID := fmt.Sprintf("chatcmpl-%d", created)
 	firstContent := true
+	hasToolCalls := false
+	toolCallIndex := -1
 	var eventType string
 
 	for scanner.Scan() {
@@ -494,8 +496,37 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 			}
 			flusher.Flush()
 
+		case "response.function_call_arguments.delta":
+			var ev struct {
+				Delta  string `json:"delta"`
+				CallID string `json:"call_id"`
+				Name   string `json:"name"`
+			}
+			if err := json.Unmarshal([]byte(data), &ev); err != nil {
+				continue
+			}
+			if ev.Name != "" {
+				toolCallIndex++
+				hasToolCalls = true
+				chunk := buildToolCallChunk(respID, model, created, firstContent, toolCallIndex, ev.CallID, ev.Name, ev.Delta)
+				firstContent = false
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+					return
+				}
+			} else {
+				chunk := buildToolCallDeltaChunk(respID, model, created, toolCallIndex, ev.Delta)
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+					return
+				}
+			}
+			flusher.Flush()
+
 		case "response.completed", "response.done":
-			chunk := buildStreamChunk(respID, model, created, false, "", "stop")
+			fr := "stop"
+			if hasToolCalls {
+				fr = "tool_calls"
+			}
+			chunk := buildStreamChunk(respID, model, created, false, "", fr)
 			fmt.Fprintf(w, "data: %s\n\n", chunk)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
@@ -535,6 +566,66 @@ func buildStreamChunk(id, model string, created int64, includeRole bool, content
 		"choices": []interface{}{choice},
 	}
 
+	b, _ := json.Marshal(chunk)
+	return b
+}
+
+func buildToolCallChunk(id, model string, created int64, includeRole bool, index int, callID, name, args string) []byte {
+	delta := map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{
+				"index": index,
+				"id":    callID,
+				"type":  "function",
+				"function": map[string]interface{}{
+					"name":      name,
+					"arguments": args,
+				},
+			},
+		},
+	}
+	if includeRole {
+		delta["role"] = "assistant"
+	}
+	choice := map[string]interface{}{
+		"index":         0,
+		"delta":         delta,
+		"finish_reason": nil,
+	}
+	chunk := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []interface{}{choice},
+	}
+	b, _ := json.Marshal(chunk)
+	return b
+}
+
+func buildToolCallDeltaChunk(id, model string, created int64, index int, args string) []byte {
+	delta := map[string]interface{}{
+		"tool_calls": []interface{}{
+			map[string]interface{}{
+				"index": index,
+				"function": map[string]interface{}{
+					"arguments": args,
+				},
+			},
+		},
+	}
+	choice := map[string]interface{}{
+		"index":         0,
+		"delta":         delta,
+		"finish_reason": nil,
+	}
+	chunk := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []interface{}{choice},
+	}
 	b, _ := json.Marshal(chunk)
 	return b
 }
@@ -581,65 +672,99 @@ func convertToOpenAIFormat(respBody []byte, chatReq map[string]interface{}) []by
 		return respBody
 	}
 
-	content := extractContent(codexResp)
 	model, _ := chatReq["model"].(string)
+	message, finishReason := extractMessage(codexResp)
+
+	choice := map[string]interface{}{
+		"index":         0,
+		"message":       message,
+		"finish_reason": finishReason,
+	}
 
 	openaiResp := map[string]interface{}{
 		"id":      codexResp["id"],
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []map[string]interface{}{
-			{
-				"index": 0,
-				"message": map[string]interface{}{
-					"role":    "assistant",
-					"content": content,
-				},
-				"finish_reason": "stop",
-			},
-		},
-		"usage": codexResp["usage"],
+		"choices": []interface{}{choice},
+		"usage":   codexResp["usage"],
 	}
 
 	result, _ := json.Marshal(openaiResp)
 	return result
 }
 
-func extractContent(resp map[string]interface{}) string {
+func extractMessage(resp map[string]interface{}) (map[string]interface{}, string) {
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": nil,
+	}
+	finishReason := "stop"
+
 	output, ok := resp["output"].([]interface{})
 	if !ok {
 		if text, ok := resp["text"].(string); ok {
-			return text
+			message["content"] = text
 		}
-		return ""
+		return message, finishReason
 	}
 
-	var parts []string
+	var textParts []string
+	var toolCalls []interface{}
+
 	for _, item := range output {
 		itemMap, ok := item.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		if itemMap["type"] == "message" {
+		switch itemMap["type"] {
+		case "message":
 			if content, ok := itemMap["content"].([]interface{}); ok {
 				for _, c := range content {
 					cMap, ok := c.(map[string]interface{})
 					if !ok {
 						continue
 					}
-					if cMap["type"] == "output_text" || cMap["type"] == "text" {
+					switch cMap["type"] {
+					case "output_text", "text":
 						if text, ok := cMap["text"].(string); ok {
-							parts = append(parts, text)
+							textParts = append(textParts, text)
+						}
+					case "refusal":
+						if r, ok := cMap["refusal"].(string); ok {
+							message["refusal"] = r
 						}
 					}
 				}
 			}
+
+		case "function_call":
+			// Codex: {"type":"function_call","call_id":"x","name":"f","arguments":"..."}
+			// Chat:  {"id":"x","type":"function","function":{"name":"f","arguments":"..."}}
+			callID, _ := itemMap["call_id"].(string)
+			name, _ := itemMap["name"].(string)
+			args, _ := itemMap["arguments"].(string)
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":   callID,
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      name,
+					"arguments": args,
+				},
+			})
 		}
 	}
 
-	return strings.Join(parts, "")
+	if len(textParts) > 0 {
+		message["content"] = strings.Join(textParts, "")
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+		finishReason = "tool_calls"
+	}
+
+	return message, finishReason
 }
 
 // ──────────────────────────────────────────────

@@ -603,13 +603,92 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 					input = append(input, m)
 					continue
 				}
-				if msg["role"] == "system" {
+				role, _ := msg["role"].(string)
+
+				switch role {
+				case "system":
 					if content, ok := msg["content"].(string); ok {
 						instructions = append(instructions, content)
 					}
-				} else {
-					convertContentTypes(msg)
-					input = append(input, msg)
+
+				case "tool":
+					// Chat: {"role":"tool","tool_call_id":"x","content":"result"}
+					// Codex: {"type":"function_call_output","call_id":"x","output":"result"}
+					output, _ := msg["content"].(string)
+					input = append(input, map[string]interface{}{
+						"type":    "function_call_output",
+						"call_id": msg["tool_call_id"],
+						"output":  output,
+					})
+
+				case "assistant":
+					// Handle text/refusal content as message
+					hasContent := false
+					assistantMsg := map[string]interface{}{"role": "assistant"}
+
+					if refusal, ok := msg["refusal"].(string); ok && refusal != "" {
+						assistantMsg["content"] = []interface{}{
+							map[string]interface{}{"type": "refusal", "refusal": refusal},
+						}
+						hasContent = true
+					} else if msg["content"] != nil {
+						content := msg["content"]
+						if s, ok := content.(string); ok && s != "" {
+							assistantMsg["content"] = []interface{}{
+								map[string]interface{}{"type": "output_text", "text": s},
+							}
+							hasContent = true
+						} else if parts, ok := content.([]interface{}); ok && len(parts) > 0 {
+							convertContentParts(parts, "assistant")
+							assistantMsg["content"] = parts
+							hasContent = true
+						}
+					}
+
+					if hasContent {
+						input = append(input, assistantMsg)
+					}
+
+					// Chat: {"tool_calls":[{"id":"x","type":"function","function":{"name":"f","arguments":"..."}}]}
+					// Codex: separate {"type":"function_call","call_id":"x","name":"f","arguments":"..."}
+					if toolCalls, ok := msg["tool_calls"].([]interface{}); ok {
+						for _, tc := range toolCalls {
+							tcMap, ok := tc.(map[string]interface{})
+							if !ok {
+								continue
+							}
+							callID, _ := tcMap["id"].(string)
+							fn, _ := tcMap["function"].(map[string]interface{})
+							if fn == nil {
+								continue
+							}
+							name, _ := fn["name"].(string)
+							args, _ := fn["arguments"].(string)
+							input = append(input, map[string]interface{}{
+								"type":      "function_call",
+								"call_id":   callID,
+								"name":      name,
+								"arguments": args,
+							})
+						}
+					}
+
+				default:
+					// user, developer, etc.
+					converted := map[string]interface{}{"role": role}
+					if name, ok := msg["name"].(string); ok {
+						converted["name"] = name
+					}
+					content := msg["content"]
+					if s, ok := content.(string); ok {
+						converted["content"] = []interface{}{
+							map[string]interface{}{"type": "input_text", "text": s},
+						}
+					} else if parts, ok := content.([]interface{}); ok {
+						convertContentParts(parts, role)
+						converted["content"] = parts
+					}
+					input = append(input, converted)
 				}
 			}
 			if len(instructions) > 0 {
@@ -638,29 +717,7 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	return json.Marshal(codexReq)
 }
 
-func convertContentTypes(msg map[string]interface{}) {
-	role, _ := msg["role"].(string)
-	content, ok := msg["content"]
-	if !ok {
-		return
-	}
-
-	// String content → wrap as single content part
-	if text, ok := content.(string); ok {
-		typeName := "input_text"
-		if role == "assistant" {
-			typeName = "output_text"
-		}
-		msg["content"] = []interface{}{
-			map[string]interface{}{"type": typeName, "text": text},
-		}
-		return
-	}
-
-	parts, ok := content.([]interface{})
-	if !ok {
-		return
-	}
+func convertContentParts(parts []interface{}, role string) {
 	for i, p := range parts {
 		part, ok := p.(map[string]interface{})
 		if !ok {
@@ -686,6 +743,26 @@ func convertContentTypes(msg map[string]interface{}) {
 			parts[i] = map[string]interface{}{
 				"type":      "input_image",
 				"image_url": imgURL,
+			}
+		case "image_file":
+			// OpenAI: {"type":"image_file","image_file":{"file_id":"..."}}
+			// Codex:  {"type":"input_file","file_id":"..."}
+			fileID := ""
+			if obj, ok := part["image_file"].(map[string]interface{}); ok {
+				fileID, _ = obj["file_id"].(string)
+			}
+			parts[i] = map[string]interface{}{
+				"type":    "input_file",
+				"file_id": fileID,
+			}
+		case "file":
+			fileID := ""
+			if obj, ok := part["file"].(map[string]interface{}); ok {
+				fileID, _ = obj["file_id"].(string)
+			}
+			parts[i] = map[string]interface{}{
+				"type":    "input_file",
+				"file_id": fileID,
 			}
 		}
 	}
