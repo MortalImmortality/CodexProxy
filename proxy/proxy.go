@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -404,20 +405,6 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	stats.requestsActive.Add(1)
 	defer stats.requestsActive.Add(-1)
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
-	if err != nil {
-		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "cannot read request body")
-		return
-	}
-
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "invalid JSON (edits requires application/json)")
-		return
-	}
-
 	var req struct {
 		Prompt         string `json:"prompt"`
 		Model          string `json:"model"`
@@ -428,7 +415,66 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		Background     string `json:"background"`
 		OutputFormat   string `json:"output_format"`
 	}
-	json.Unmarshal(body, &req)
+	var inputImages []string
+
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		// OpenAI SDK sends images.edits as multipart with image file(s).
+		if err := r.ParseMultipartForm(maxRequestBodySize); err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 400, "bad_request", "cannot parse multipart form")
+			return
+		}
+		req.Prompt = r.FormValue("prompt")
+		req.Model = r.FormValue("model")
+		req.Size = r.FormValue("size")
+		req.Quality = r.FormValue("quality")
+		req.ResponseFormat = r.FormValue("response_format")
+		req.Background = r.FormValue("background")
+		req.OutputFormat = r.FormValue("output_format")
+		if n := r.FormValue("n"); n != "" {
+			req.N, _ = strconv.Atoi(n)
+		}
+
+		if r.MultipartForm != nil {
+			for _, field := range []string{"image", "image[]", "images", "images[]"} {
+				for _, fh := range r.MultipartForm.File[field] {
+					f, err := fh.Open()
+					if err != nil {
+						continue
+					}
+					raw, err := io.ReadAll(f)
+					f.Close()
+					if err != nil || len(raw) == 0 {
+						continue
+					}
+					mime := fh.Header.Get("Content-Type")
+					if mime == "" {
+						mime = http.DetectContentType(raw)
+					}
+					dataURL := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+					inputImages = append(inputImages, dataURL)
+				}
+			}
+		}
+	} else {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
+		if err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 400, "bad_request", "cannot read request body")
+			return
+		}
+		var raw map[string]interface{}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 400, "bad_request", "invalid JSON")
+			return
+		}
+		json.Unmarshal(body, &req)
+		if isEdit {
+			inputImages = extractImageRefs(raw)
+		}
+	}
 
 	if req.Prompt == "" {
 		stats.errorsTotal.Add(1)
@@ -436,14 +482,10 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		return
 	}
 
-	var inputImages []string
-	if isEdit {
-		inputImages = extractImageRefs(raw)
-		if len(inputImages) == 0 {
-			stats.errorsTotal.Add(1)
-			writeError(w, 400, "bad_request", "edits requires at least one image (image or images[])")
-			return
-		}
+	if isEdit && len(inputImages) == 0 {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "edits requires at least one image")
+		return
 	}
 
 	imageModel := req.Model
