@@ -228,7 +228,11 @@ func printAccountUsage(name string, info *auth.UsageInfo) {
 	if info.LimitHit {
 		status = "✗ LIMIT HIT"
 	}
-	fmt.Printf("  [%s]\n", name)
+	label := name
+	if info.Email != "" {
+		label = info.Email
+	}
+	fmt.Printf("  [%s]\n", label)
 	fmt.Printf("    Plan:     %s\n", info.PlanType)
 	fmt.Printf("    Status:   %s\n", status)
 	if len(info.Windows) == 0 {

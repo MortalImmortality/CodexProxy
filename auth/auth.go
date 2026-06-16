@@ -589,17 +589,40 @@ func DiscoverModels(accessToken string) ([]string, error) {
 const UsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
 type UsageWindow struct {
-	Name        string `json:"name"`
-	UsedPercent int    `json:"used_percent"`
-	ResetSecs   int    `json:"reset_after_seconds"`
+	Name           string `json:"name"`
+	UsedPercent    int    `json:"used_percent"`
+	ResetSecs      int    `json:"reset_after_seconds"`
+	WindowSecs     int    `json:"limit_window_seconds"`
 }
 
 type UsageInfo struct {
 	PlanType string        `json:"plan_type"`
+	Email    string        `json:"email"`
 	Allowed  bool          `json:"allowed"`
 	LimitHit bool          `json:"limit_reached"`
 	Windows  []UsageWindow `json:"windows"`
 	RawJSON  string        `json:"-"`
+}
+
+type usageRawWindow struct {
+	UsedPercent    int `json:"used_percent"`
+	LimitWindowSecs int `json:"limit_window_seconds"`
+	ResetAfterSecs int `json:"reset_after_seconds"`
+}
+
+func windowLabel(windowSecs int, fallback string) string {
+	switch {
+	case windowSecs <= 0:
+		return fallback
+	case windowSecs < 3600:
+		return fmt.Sprintf("%dm", windowSecs/60)
+	case windowSecs < 86400:
+		return fmt.Sprintf("%dh", windowSecs/3600)
+	case windowSecs < 604800:
+		return fmt.Sprintf("%dd", windowSecs/86400)
+	default:
+		return "weekly"
+	}
 }
 
 func QueryUsage(accessToken string) (*UsageInfo, error) {
@@ -620,58 +643,37 @@ func QueryUsage(accessToken string) (*UsageInfo, error) {
 
 	var raw struct {
 		PlanType  string `json:"plan_type"`
+		Email     string `json:"email"`
 		RateLimit *struct {
-			Allowed      bool `json:"allowed"`
-			LimitReached bool `json:"limit_reached"`
-			Windows      map[string]*struct {
-				UsedPercent    int `json:"used_percent"`
-				ResetAfterSecs int `json:"reset_after_seconds"`
-			} `json:"-"`
+			Allowed        bool `json:"allowed"`
+			LimitReached   bool `json:"limit_reached"`
+			PrimaryWindow  *usageRawWindow `json:"primary_window"`
+			SecondaryWindow *usageRawWindow `json:"secondary_window"`
 		} `json:"rate_limit"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("cannot parse usage: %w", err)
 	}
 
-	info := &UsageInfo{PlanType: raw.PlanType, RawJSON: string(body)}
+	info := &UsageInfo{PlanType: raw.PlanType, Email: raw.Email, RawJSON: string(body)}
 	if raw.RateLimit != nil {
 		info.Allowed = raw.RateLimit.Allowed
 		info.LimitHit = raw.RateLimit.LimitReached
-
-		var rlMap map[string]json.RawMessage
-		if err := json.Unmarshal(body, &struct {
-			RateLimit *json.RawMessage `json:"rate_limit"`
-		}{}); err == nil {
+		if w := raw.RateLimit.PrimaryWindow; w != nil {
+			info.Windows = append(info.Windows, UsageWindow{
+				Name:        windowLabel(w.LimitWindowSecs, "session"),
+				UsedPercent: w.UsedPercent,
+				ResetSecs:   w.ResetAfterSecs,
+				WindowSecs:  w.LimitWindowSecs,
+			})
 		}
-
-		var top map[string]json.RawMessage
-		json.Unmarshal(body, &top)
-		if rlRaw, ok := top["rate_limit"]; ok {
-			json.Unmarshal(rlRaw, &rlMap)
-		}
-
-		windowNames := []struct{ key, label string }{
-			{"primary_window", "session"},
-			{"secondary_window", "weekly"},
-			{"session_window", "session"},
-			{"weekly_window", "weekly"},
-		}
-		seen := map[string]bool{}
-		for _, wn := range windowNames {
-			if wRaw, ok := rlMap[wn.key]; ok && !seen[wn.label] {
-				var w struct {
-					UsedPercent    int `json:"used_percent"`
-					ResetAfterSecs int `json:"reset_after_seconds"`
-				}
-				if json.Unmarshal(wRaw, &w) == nil {
-					info.Windows = append(info.Windows, UsageWindow{
-						Name:        wn.label,
-						UsedPercent: w.UsedPercent,
-						ResetSecs:   w.ResetAfterSecs,
-					})
-					seen[wn.label] = true
-				}
-			}
+		if w := raw.RateLimit.SecondaryWindow; w != nil {
+			info.Windows = append(info.Windows, UsageWindow{
+				Name:        windowLabel(w.LimitWindowSecs, "weekly"),
+				UsedPercent: w.UsedPercent,
+				ResetSecs:   w.ResetAfterSecs,
+				WindowSecs:  w.LimitWindowSecs,
+			})
 		}
 	}
 	return info, nil

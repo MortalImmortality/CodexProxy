@@ -789,6 +789,7 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		entry := map[string]interface{}{
 			"account":       tm.Name(),
+			"email":         info.Email,
 			"plan_type":     info.PlanType,
 			"allowed":       info.Allowed,
 			"limit_reached": info.LimitHit,
