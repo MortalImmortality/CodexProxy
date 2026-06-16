@@ -81,6 +81,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
+	mux.HandleFunc("/usage", handleUsage)
 	mux.HandleFunc("/v1/responses", handleResponses)
 	mux.HandleFunc("/v1/models", makeModelsHandler(models))
 
@@ -762,6 +763,47 @@ func extractMessage(resp map[string]interface{}) (map[string]interface{}, string
 }
 
 // ──────────────────────────────────────────────
+// Usage endpoint
+// ──────────────────────────────────────────────
+
+func handleUsage(w http.ResponseWriter, r *http.Request) {
+	managers := auth.Pool.Managers()
+	results := make([]map[string]interface{}, 0, len(managers))
+
+	for _, tm := range managers {
+		token := tm.GetAccessToken()
+		if token == "" {
+			results = append(results, map[string]interface{}{
+				"account": tm.Name(),
+				"error":   "no token",
+			})
+			continue
+		}
+		info, err := auth.QueryUsage(token)
+		if err != nil {
+			results = append(results, map[string]interface{}{
+				"account": tm.Name(),
+				"error":   err.Error(),
+			})
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"account":             tm.Name(),
+			"plan_type":           info.PlanType,
+			"used_percent":        info.UsedPercent,
+			"allowed":             info.Allowed,
+			"limit_reached":       info.LimitHit,
+			"reset_after_seconds": info.ResetSecs,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"accounts": results,
+	})
+}
+
+// ──────────────────────────────────────────────
 // Middleware
 // ──────────────────────────────────────────────
 
@@ -769,7 +811,6 @@ func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" ||
 			r.URL.Path == "/health" ||
-			r.URL.Path == "/metrics" ||
 			r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return

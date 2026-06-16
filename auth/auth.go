@@ -586,6 +586,59 @@ func DiscoverModels(accessToken string) ([]string, error) {
 	return models, nil
 }
 
+const UsageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+type UsageInfo struct {
+	PlanType    string `json:"plan_type"`
+	Allowed     bool   `json:"allowed"`
+	LimitHit    bool   `json:"limit_reached"`
+	UsedPercent int    `json:"used_percent"`
+	ResetSecs   int    `json:"reset_after_seconds"`
+}
+
+func QueryUsage(accessToken string) (*UsageInfo, error) {
+	req, _ := http.NewRequest("GET", UsageURL, nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("usage query returned %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
+	}
+
+	var raw struct {
+		PlanType string `json:"plan_type"`
+		RateLimit *struct {
+			Allowed      bool `json:"allowed"`
+			LimitReached bool `json:"limit_reached"`
+			PrimaryWindow *struct {
+				UsedPercent     int `json:"used_percent"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
+			} `json:"primary_window"`
+		} `json:"rate_limit"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse usage: %w", err)
+	}
+
+	info := &UsageInfo{PlanType: raw.PlanType}
+	if raw.RateLimit != nil {
+		info.Allowed = raw.RateLimit.Allowed
+		info.LimitHit = raw.RateLimit.LimitReached
+		if raw.RateLimit.PrimaryWindow != nil {
+			info.UsedPercent = raw.RateLimit.PrimaryWindow.UsedPercent
+			info.ResetSecs = raw.RateLimit.PrimaryWindow.ResetAfterSecs
+		}
+	}
+	return info, nil
+}
+
 func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	codexReq := map[string]interface{}{
 		"model":  chatReq["model"],

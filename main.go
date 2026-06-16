@@ -119,6 +119,9 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "usage":
+		cmdUsage()
+
 	case "logout":
 		auth.Logout()
 
@@ -173,6 +176,61 @@ func initPool(configPath string, host, port *string) {
 		"strategy", strategy)
 }
 
+func cmdUsage() {
+	cfg, err := loadConfig(defaultConfigPath())
+	if err != nil {
+		token, err := auth.Manager.EnsureFreshToken()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot get token: %v\n", err)
+			os.Exit(1)
+		}
+		info, err := auth.QueryUsage(token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Usage query failed: %v\n", err)
+			os.Exit(1)
+		}
+		printAccountUsage("default", info)
+		return
+	}
+
+	for _, acc := range cfg.Accounts {
+		tm := auth.NewTokenManager(acc.Name, expandHome(acc.AuthFile))
+		token, err := tm.EnsureFreshToken()
+		if err != nil {
+			fmt.Printf("  [%s] error: %v\n\n", acc.Name, err)
+			continue
+		}
+		info, err := auth.QueryUsage(token)
+		if err != nil {
+			fmt.Printf("  [%s] usage query failed: %v\n\n", acc.Name, err)
+			continue
+		}
+		printAccountUsage(acc.Name, info)
+	}
+}
+
+func printAccountUsage(name string, info *auth.UsageInfo) {
+	resetMin := info.ResetSecs / 60
+	status := "✓"
+	if info.LimitHit {
+		status = "✗ LIMIT HIT"
+	}
+	bar := ""
+	filled := info.UsedPercent / 5
+	for i := 0; i < 20; i++ {
+		if i < filled {
+			bar += "█"
+		} else {
+			bar += "░"
+		}
+	}
+	fmt.Printf("  [%s]\n", name)
+	fmt.Printf("    Plan:     %s\n", info.PlanType)
+	fmt.Printf("    Usage:    [%s] %d%%\n", bar, info.UsedPercent)
+	fmt.Printf("    Status:   %s\n", status)
+	fmt.Printf("    Reset in: %dm\n\n", resetMin)
+}
+
 func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
@@ -180,6 +238,7 @@ Usage:
   codex-proxy login [--auth-file PATH]                   Login via browser OAuth
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
+  codex-proxy usage                                      Show account rate limit usage
   codex-proxy logout                                     Remove stored credentials
 
 API key management:
