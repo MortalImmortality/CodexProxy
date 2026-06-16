@@ -644,11 +644,24 @@ func convertContentTypes(msg map[string]interface{}) {
 	if !ok {
 		return
 	}
+
+	// String content → wrap as single content part
+	if text, ok := content.(string); ok {
+		typeName := "input_text"
+		if role == "assistant" {
+			typeName = "output_text"
+		}
+		msg["content"] = []interface{}{
+			map[string]interface{}{"type": typeName, "text": text},
+		}
+		return
+	}
+
 	parts, ok := content.([]interface{})
 	if !ok {
 		return
 	}
-	for _, p := range parts {
+	for i, p := range parts {
 		part, ok := p.(map[string]interface{})
 		if !ok {
 			continue
@@ -662,7 +675,18 @@ func convertContentTypes(msg map[string]interface{}) {
 				part["type"] = "input_text"
 			}
 		case "image_url":
-			part["type"] = "input_image"
+			// OpenAI: {"type":"image_url","image_url":{"url":"...","detail":"..."}}
+			// Codex:  {"type":"input_image","image_url":"..."}
+			imgURL := ""
+			if obj, ok := part["image_url"].(map[string]interface{}); ok {
+				imgURL, _ = obj["url"].(string)
+			} else if s, ok := part["image_url"].(string); ok {
+				imgURL = s
+			}
+			parts[i] = map[string]interface{}{
+				"type":      "input_image",
+				"image_url": imgURL,
+			}
 		}
 	}
 }
