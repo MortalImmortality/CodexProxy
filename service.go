@@ -71,7 +71,7 @@ WantedBy=default.target
 	fmt.Println("  ✓ Service installed and enabled")
 	fmt.Println()
 	fmt.Println("  Next:")
-	fmt.Println("    codex-proxy login --device-auth")
+	fmt.Println("    codex-proxy login")
 	fmt.Println("    codex-proxy start")
 }
 

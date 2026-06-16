@@ -21,23 +21,17 @@ func main() {
 
 	switch os.Args[1] {
 	case "login":
-		deviceAuth := false
 		authFile := ""
 		for i := 2; i < len(os.Args); i++ {
-			switch os.Args[i] {
-			case "--device-auth":
-				deviceAuth = true
-			case "--auth-file":
-				if i+1 < len(os.Args) {
-					authFile = os.Args[i+1]
-					i++
-				}
+			if os.Args[i] == "--auth-file" && i+1 < len(os.Args) {
+				authFile = os.Args[i+1]
+				i++
 			}
 		}
 		if authFile != "" {
 			auth.SetManagerPath(expandHome(authFile))
 		}
-		if err := auth.Login(deviceAuth); err != nil {
+		if err := auth.Login(); err != nil {
 			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -157,8 +151,7 @@ func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
-  codex-proxy login [--auth-file PATH]                   Login via browser (paste callback URL)
-  codex-proxy login --device-auth [--auth-file PATH]     Login via device code (headless)
+  codex-proxy login [--auth-file PATH]                   Login via browser OAuth
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy logout                                     Remove stored credentials

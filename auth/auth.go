@@ -24,7 +24,6 @@ import (
 const (
 	OAuthAuthorizeURL = "https://auth.openai.com/authorize"
 	OAuthTokenURL     = "https://auth.openai.com/oauth/token"
-	OAuthDeviceURL    = "https://auth.openai.com/codex/device"
 
 	OAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 	CodexBaseURL  = "https://chatgpt.com/backend-api/codex"
@@ -79,18 +78,6 @@ type Tokens struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	AccountID    string `json:"account_id,omitempty"`
-}
-
-// ──────────────────────────────────────────────
-// Device Code flow types
-// ──────────────────────────────────────────────
-
-type DeviceCodeResponse struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURI string `json:"verification_uri"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
 }
 
 type TokenResponse struct {
@@ -237,112 +224,11 @@ func (tm *TokenManager) IsHealthy() (bool, string) {
 }
 
 // ──────────────────────────────────────────────
-// Login - Device Code flow implementation
+// Login - Browser-based OAuth with PKCE
 // ──────────────────────────────────────────────
 
-func Login(deviceAuth bool) error {
-	if deviceAuth {
-		return loginDeviceCode()
-	}
+func Login() error {
 	return loginBrowser()
-}
-
-func loginDeviceCode() error {
-	fmt.Println("Requesting device code from OpenAI...")
-
-	body, status, err := curlPostForm(OAuthDeviceURL, url.Values{
-		"client_id": {OAuthClientID},
-		"scope":     {"openid profile email offline_access"},
-	})
-	if err != nil {
-		return fmt.Errorf("device code request failed: %w", err)
-	}
-
-	if status != 200 {
-		return fmt.Errorf("device code request returned %d: %s", status, body)
-	}
-
-	var dc DeviceCodeResponse
-	if err := json.Unmarshal(body, &dc); err != nil {
-		return fmt.Errorf("failed to parse device code response: %w", err)
-	}
-
-	fmt.Println()
-	fmt.Println("  ╭─────────────────────────────────────────────╮")
-	fmt.Printf("  │  Open:  %-36s │\n", dc.VerificationURI)
-	fmt.Printf("  │  Code:  %-36s │\n", dc.UserCode)
-	fmt.Println("  ╰─────────────────────────────────────────────╯")
-	fmt.Println()
-	fmt.Println("  Waiting for authorization...")
-
-	openBrowser(dc.VerificationURI)
-
-	interval := dc.Interval
-	if interval < 5 {
-		interval = 5
-	}
-	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
-
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Duration(interval) * time.Second)
-
-		tokenResp, err := pollDeviceToken(dc.DeviceCode)
-		if err != nil {
-			return err
-		}
-
-		switch tokenResp.Error {
-		case "":
-			authFile := &AuthFile{
-				AuthMode: "chatgptDeviceCode",
-				Tokens: Tokens{
-					IDToken:      tokenResp.IDToken,
-					AccessToken:  tokenResp.AccessToken,
-					RefreshToken: tokenResp.RefreshToken,
-				},
-				LastRefresh: time.Now(),
-			}
-			if err := saveAuthFile(authFile, Manager.filePath); err != nil {
-				return err
-			}
-			Manager.mu.Lock()
-			Manager.authFile = authFile
-			Manager.mu.Unlock()
-			fmt.Println("  ✓ Authenticated successfully!")
-			fmt.Printf("  Token saved to %s\n", Manager.filePath)
-			return nil
-
-		case "authorization_pending":
-			fmt.Print(".")
-			continue
-		case "slow_down":
-			interval += 5
-			continue
-		case "expired_token":
-			return fmt.Errorf("device code expired, please try again")
-		default:
-			return fmt.Errorf("unexpected error: %s", tokenResp.Error)
-		}
-	}
-
-	return fmt.Errorf("timed out waiting for authorization")
-}
-
-func pollDeviceToken(deviceCode string) (*TokenResponse, error) {
-	body, _, err := curlPostForm(OAuthTokenURL, url.Values{
-		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
-		"device_code": {deviceCode},
-		"client_id":   {OAuthClientID},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("token poll failed: %w", err)
-	}
-
-	var tr TokenResponse
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
-	}
-	return &tr, nil
 }
 
 func loginBrowser() error {

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 go build -o codex-proxy .
-./codex-proxy login --device-auth   # authenticate via device code flow
+./codex-proxy login                 # authenticate via browser OAuth
 ./codex-proxy serve                 # start proxy on :10531 (foreground)
 ./codex-proxy serve --host 0.0.0.0 --port 8080
 ./codex-proxy status                # show auth + service status
@@ -46,7 +46,7 @@ codex-proxy.plist        macOS launchd service definition
 
 - **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
 
-- **`auth/auth.go`** — OAuth device code flow, token persistence (`~/.codex/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. All HTTP calls use a dedicated `httpClient` with 30s timeout (never `http.DefaultClient`).
+- **`auth/auth.go`** — Browser-based OAuth with PKCE, token persistence (`~/.codex/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. Auth requests use `curl` subprocess to avoid Cloudflare TLS fingerprint blocking on VPS.
 
 - **`proxy/proxy.go`** — HTTP server with OpenAI-compatible endpoints. Two HTTP clients: `normalClient` (60s timeout) and `streamClient` (no overall timeout, 30s response header timeout). `callUpstream` handles 401→refresh-and-retry plus 429/5xx→exponential backoff (max 2 retries). Streaming `/v1/chat/completions` converts Codex SSE events (`response.output_text.delta`, `response.completed`) into OpenAI chat completion chunk format. `/v1/responses` does raw SSE passthrough. Request bodies capped at 10MB via `http.MaxBytesReader`.
 
