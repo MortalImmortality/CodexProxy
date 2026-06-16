@@ -158,13 +158,49 @@ codex-proxy usage
 
 也可通过 HTTP 查询：`GET /usage`
 
+## 文生图 / 图生图
+
+Codex 后端支持图片生成（`gpt-image-2`）。代理暴露 OpenAI 兼容的 images 接口。
+
+**文生图** (`/v1/images/generations`)：
+```python
+resp = client.images.generate(
+    model="gpt-image-2",
+    prompt="一只戴墨镜的柴犬",
+    size="1024x1024",
+)
+# resp.data[0].b64_json
+```
+
+```bash
+curl http://YOUR_HOST:10531/v1/images/generations \
+  -H "Authorization: Bearer cpx-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"一只戴墨镜的柴犬","size":"1024x1024"}'
+```
+
+**图生图** (`/v1/images/edits`)：在原图基础上修改。支持 multipart 文件上传（OpenAI SDK 标准）或 JSON 传 data URL。
+```python
+resp = client.images.edit(
+    model="gpt-image-2",
+    image=open("cat.png", "rb"),
+    prompt="给猫戴上一顶帽子",
+)
+```
+
+也可在 chat completions 里直接用：传 `tools: [{"type":"image_generation","model":"gpt-image-2"}]`，生成的图以 markdown `![image](data:...)` 形式返回。
+
+> 默认图片模型 `gpt-image-2`。模型发现失败时图片接口返回 503。
+
 ## API 端点
 
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
-| `/v1/chat/completions` | POST | 需要 | OpenAI 兼容的 Chat Completions API |
+| `/v1/chat/completions` | POST | 需要 | OpenAI 兼容的 Chat Completions API（支持文生图工具） |
+| `/v1/images/generations` | POST | 需要 | 文生图（OpenAI images API 兼容） |
+| `/v1/images/edits` | POST | 需要 | 图生图（multipart 或 JSON data URL） |
 | `/v1/responses` | POST | 需要 | Codex Responses API 直通 |
-| `/v1/models` | GET | 不需要 | 列出当前账号可用的模型 |
+| `/v1/models` | GET | 不需要 | 列出可用模型（含 `gpt-image-2`） |
 | `/health` | GET | 不需要 | 健康检查（含 Token 状态） |
 | `/metrics` | GET | 不需要 | 运行指标（请求数、错误数、重试次数、uptime） |
 | `/usage` | GET | 不需要 | 各账号 rate limit 用量 |
