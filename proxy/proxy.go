@@ -75,17 +75,21 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 
 	models, err := auth.DiscoverModels(handle.Token)
 	if err != nil {
-		slog.Warn("model discovery failed, using fallback", "error", err)
-		models = []string{"o3-pro", "gpt-5.4", "gpt-5.3-codex", "o4-mini"}
+		slog.Warn("model discovery failed; /v1/models will be empty and image generation unavailable until it succeeds", "error", err)
+		models = nil
 	}
 
-	// baseModel for image requests is models[0] (a chat model), so the image
-	// model must be advertised at the end, never first.
-	baseModel := "o4-mini"
+	// baseModel for image requests is models[0] (a real chat model). If
+	// discovery failed it stays empty and the image handlers reject requests
+	// rather than guessing a model name.
+	baseModel := ""
 	if len(models) > 0 {
 		baseModel = models[0]
 	}
-	listedModels := append(append([]string{}, models...), "gpt-image-2")
+	listedModels := append([]string{}, models...)
+	if baseModel != "" {
+		listedModels = append(listedModels, "gpt-image-2")
+	}
 
 	mux := http.NewServeMux()
 
@@ -398,6 +402,11 @@ func extractImageRefs(raw map[string]interface{}) []string {
 func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdit bool) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "method_not_allowed", "POST only")
+		return
+	}
+
+	if baseModel == "" {
+		writeError(w, 503, "model_unavailable", "model discovery failed at startup; image generation unavailable")
 		return
 	}
 
