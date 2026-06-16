@@ -2,13 +2,19 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"codex-proxy/auth"
 )
 
 func TestConvertToOpenAIFormat(t *testing.T) {
@@ -367,4 +373,154 @@ func TestCORSAllowsXAPIKey(t *testing.T) {
 	if !strings.Contains(allow, "X-API-Key") {
 		t.Fatalf("allowed headers = %q, want X-API-Key", allow)
 	}
+}
+
+func TestCallUpstreamRefreshesOn401AndRetriesWithAccountID(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth-a.json")
+	writeTestAuthFile(t, authFile, "old-token", "refresh-a", "acct-a")
+	writeFakeCurl(t, dir, `{"access_token":"new-token","refresh_token":"new-refresh","token_type":"Bearer"}`)
+
+	oldPool := auth.Pool
+	oldNormalClient := normalClient
+	oldStreamClient := streamClient
+	t.Cleanup(func() {
+		auth.Pool = oldPool
+		normalClient = oldNormalClient
+		streamClient = oldStreamClient
+	})
+	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{{Name: "a", AuthFile: authFile}}, "round-robin")
+
+	type seenRequest struct {
+		authHeader string
+		accountID  string
+	}
+	var seen []seenRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, seenRequest{
+			authHeader: r.Header.Get("Authorization"),
+			accountID:  r.Header.Get("chatgpt-account-id"),
+		})
+		if len(seen) == 1 {
+			http.Error(w, "expired", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	normalClient = upstream.Client()
+	streamClient = upstream.Client()
+
+	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
+	if err != nil {
+		t.Fatalf("callUpstream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("upstream calls = %d, want 2: %#v", len(seen), seen)
+	}
+	if seen[0].authHeader != "Bearer old-token" || seen[0].accountID != "acct-a" {
+		t.Fatalf("first request = %#v, want old token and acct-a", seen[0])
+	}
+	if seen[1].authHeader != "Bearer new-token" || seen[1].accountID != "acct-a" {
+		t.Fatalf("retry request = %#v, want refreshed token and acct-a", seen[1])
+	}
+}
+
+func TestCallUpstreamFallsBackToAnotherAccountWhenRefreshFails(t *testing.T) {
+	dir := t.TempDir()
+	authFileA := filepath.Join(dir, "auth-a.json")
+	authFileB := filepath.Join(dir, "auth-b.json")
+	writeTestAuthFile(t, authFileA, "token-a", "", "acct-a")
+	writeTestAuthFile(t, authFileB, "token-b", "refresh-b", "acct-b")
+
+	oldPool := auth.Pool
+	oldNormalClient := normalClient
+	oldStreamClient := streamClient
+	t.Cleanup(func() {
+		auth.Pool = oldPool
+		normalClient = oldNormalClient
+		streamClient = oldStreamClient
+	})
+	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{
+		{Name: "a", AuthFile: authFileA},
+		{Name: "b", AuthFile: authFileB},
+	}, "round-robin")
+
+	type seenRequest struct {
+		authHeader string
+		accountID  string
+	}
+	var seen []seenRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, seenRequest{
+			authHeader: r.Header.Get("Authorization"),
+			accountID:  r.Header.Get("chatgpt-account-id"),
+		})
+		if len(seen) == 1 {
+			http.Error(w, "expired", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	normalClient = upstream.Client()
+	streamClient = upstream.Client()
+
+	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
+	if err != nil {
+		t.Fatalf("callUpstream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("upstream calls = %d, want 2: %#v", len(seen), seen)
+	}
+	if seen[0].authHeader != "Bearer token-a" || seen[0].accountID != "acct-a" {
+		t.Fatalf("first request = %#v, want account a", seen[0])
+	}
+	if seen[1].authHeader != "Bearer token-b" || seen[1].accountID != "acct-b" {
+		t.Fatalf("fallback request = %#v, want account b", seen[1])
+	}
+}
+
+func writeTestAuthFile(t *testing.T, path, accessToken, refreshToken, accountID string) {
+	t.Helper()
+	authFile := auth.AuthFile{
+		AuthMode: "browser",
+		Tokens: auth.Tokens{
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+			AccountID:    accountID,
+		},
+		LastRefresh: time.Now(),
+	}
+	body, err := json.Marshal(authFile)
+	if err != nil {
+		t.Fatalf("marshal auth file: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+}
+
+func writeFakeCurl(t *testing.T, dir, responseJSON string) {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "curl")
+	script := "#!/bin/sh\nprintf '%s\\n' '" + responseJSON + "'\nprintf '200'\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake curl: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
