@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -109,11 +110,43 @@ func TestExtractContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractContent(tt.resp)
+			msg, _ := extractMessage(tt.resp)
+			got, _ := msg["content"].(string)
 			if got != tt.want {
-				t.Errorf("extractContent = %q, want %q", got, tt.want)
+				t.Errorf("extractMessage content = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAggregateCodexResponseUsesDeltasWhenCompletedHasNoOutput(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"pong"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	respBody := aggregateCodexResponse(strings.NewReader(sse))
+	chatReq := map[string]interface{}{"model": "gpt-5.4-mini"}
+	result := convertToOpenAIFormat(respBody, chatReq)
+
+	var openaiResp map[string]interface{}
+	if err := json.Unmarshal(result, &openaiResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	choices := openaiResp["choices"].([]interface{})
+	msg := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "pong" {
+		t.Errorf("content = %v, want pong", msg["content"])
+	}
+	usage := openaiResp["usage"].(map[string]interface{})
+	if usage["total_tokens"] != float64(4) {
+		t.Errorf("total_tokens = %v, want 4", usage["total_tokens"])
 	}
 }
 

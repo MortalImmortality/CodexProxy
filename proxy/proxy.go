@@ -40,9 +40,9 @@ var (
 	streamClient = &http.Client{
 		Transport: &http.Transport{
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			TLSHandshakeTimeout:  10 * time.Second,
-			MaxIdleConns:         20,
-			IdleConnTimeout:      90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			MaxIdleConns:          20,
+			IdleConnTimeout:       90 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
 	}
@@ -136,7 +136,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"service":          "codex-proxy",
+			"service":           "codex-proxy",
 			"openai_compatible": true,
 			"endpoints": []string{
 				"/v1/chat/completions",
@@ -395,6 +395,7 @@ func aggregateCodexResponse(body io.Reader) []byte {
 
 	var textBuf strings.Builder
 	var eventType string
+	var completedResponse json.RawMessage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -429,22 +430,83 @@ func aggregateCodexResponse(body io.Reader) []byte {
 			textBuf.WriteString(ev.Delta)
 		case "response.completed", "response.done":
 			if len(ev.Response) > 0 {
-				return ev.Response
+				completedResponse = ev.Response
 			}
 		}
 		eventType = ""
+	}
+
+	if completedResponse != nil {
+		if textBuf.Len() > 0 {
+			if patched := injectOutputTextIfMissing(completedResponse, textBuf.String()); patched != nil {
+				return patched
+			}
+		}
+		return completedResponse
 	}
 
 	if textBuf.Len() == 0 {
 		return nil
 	}
 	// Fallback: no response object seen, wrap accumulated text.
+	return synthesizeTextResponse(textBuf.String())
+}
+
+func injectOutputTextIfMissing(respBody []byte, text string) []byte {
+	var resp map[string]interface{}
+	if json.Unmarshal(respBody, &resp) != nil {
+		return nil
+	}
+	if responseHasOutput(resp) {
+		return nil
+	}
+	resp["output"] = []interface{}{
+		map[string]interface{}{
+			"type": "message",
+			"content": []interface{}{
+				map[string]interface{}{"type": "output_text", "text": text},
+			},
+		},
+	}
+	b, _ := json.Marshal(resp)
+	return b
+}
+
+func responseHasOutput(resp map[string]interface{}) bool {
+	message, _ := extractMessage(resp)
+	if content, ok := message["content"].(string); ok && content != "" {
+		return true
+	}
+	if _, ok := message["refusal"].(string); ok {
+		return true
+	}
+	if toolCalls, ok := message["tool_calls"].([]interface{}); ok && len(toolCalls) > 0 {
+		return true
+	}
+	output, ok := resp["output"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, item := range output {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch itemMap["type"] {
+		case "function_call", "image_generation_call":
+			return true
+		}
+	}
+	return false
+}
+
+func synthesizeTextResponse(text string) []byte {
 	synth := map[string]interface{}{
 		"output": []interface{}{
 			map[string]interface{}{
 				"type": "message",
 				"content": []interface{}{
-					map[string]interface{}{"type": "output_text", "text": textBuf.String()},
+					map[string]interface{}{"type": "output_text", "text": text},
 				},
 			},
 		},
@@ -734,8 +796,8 @@ func parseImageSSE(body io.Reader) []imageResult {
 		}
 
 		var ev struct {
-			Type     string `json:"type"`
-			Item     *struct {
+			Type string `json:"type"`
+			Item *struct {
 				Type          string `json:"type"`
 				Result        string `json:"result"`
 				RevisedPrompt string `json:"revised_prompt"`

@@ -122,7 +122,7 @@ func NewTokenManager(name, filePath string) *TokenManager {
 }
 
 func (tm *TokenManager) Name() string     { return tm.name }
-func (tm *TokenManager) FilePath() string  { return tm.filePath }
+func (tm *TokenManager) FilePath() string { return tm.filePath }
 
 func (tm *TokenManager) MarkFailed(err error) {
 	tm.failMu.Lock()
@@ -240,12 +240,12 @@ func loginBrowser() error {
 	params := url.Values{
 		"response_type":              {"code"},
 		"client_id":                  {OAuthClientID},
-		"redirect_uri":              {redirectURI},
-		"code_challenge":            {challenge},
-		"code_challenge_method":     {"S256"},
-		"scope":                     {"openid profile email offline_access"},
-		"state":                     {state},
-		"codex_cli_simplified_flow": {"true"},
+		"redirect_uri":               {redirectURI},
+		"code_challenge":             {challenge},
+		"code_challenge_method":      {"S256"},
+		"scope":                      {"openid profile email offline_access"},
+		"state":                      {state},
+		"codex_cli_simplified_flow":  {"true"},
 		"id_token_add_organizations": {"true"},
 	}
 	authorizeURL := OAuthAuthorizeURL + "?" + params.Encode()
@@ -625,10 +625,10 @@ func DiscoverModels(accessToken string) ([]string, error) {
 const UsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
 type UsageWindow struct {
-	Name           string `json:"name"`
-	UsedPercent    int    `json:"used_percent"`
-	ResetSecs      int    `json:"reset_after_seconds"`
-	WindowSecs     int    `json:"limit_window_seconds"`
+	Name        string `json:"name"`
+	UsedPercent int    `json:"used_percent"`
+	ResetSecs   int    `json:"reset_after_seconds"`
+	WindowSecs  int    `json:"limit_window_seconds"`
 }
 
 type UsageInfo struct {
@@ -641,9 +641,9 @@ type UsageInfo struct {
 }
 
 type usageRawWindow struct {
-	UsedPercent    int `json:"used_percent"`
+	UsedPercent     int `json:"used_percent"`
 	LimitWindowSecs int `json:"limit_window_seconds"`
-	ResetAfterSecs int `json:"reset_after_seconds"`
+	ResetAfterSecs  int `json:"reset_after_seconds"`
 }
 
 func windowLabel(windowSecs int, fallback string) string {
@@ -681,9 +681,9 @@ func QueryUsage(accessToken string) (*UsageInfo, error) {
 		PlanType  string `json:"plan_type"`
 		Email     string `json:"email"`
 		RateLimit *struct {
-			Allowed        bool `json:"allowed"`
-			LimitReached   bool `json:"limit_reached"`
-			PrimaryWindow  *usageRawWindow `json:"primary_window"`
+			Allowed         bool            `json:"allowed"`
+			LimitReached    bool            `json:"limit_reached"`
+			PrimaryWindow   *usageRawWindow `json:"primary_window"`
 			SecondaryWindow *usageRawWindow `json:"secondary_window"`
 		} `json:"rate_limit"`
 	}
@@ -834,8 +834,8 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 		codexReq["instructions"] = "You are a helpful assistant."
 	}
 
-	// Params the Responses API accepts verbatim.
-	for _, key := range []string{"max_output_tokens", "tool_choice"} {
+	// Params the Codex backend accepts verbatim.
+	for _, key := range []string{"tool_choice"} {
 		if v, ok := chatReq[key]; ok {
 			codexReq[key] = v
 		}
@@ -852,15 +852,9 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 		}
 	}
 
-	// Chat `max_tokens` → Responses `max_output_tokens` (no native max_tokens).
-	// Do not clobber an explicit max_output_tokens.
-	if _, ok := codexReq["max_output_tokens"]; !ok {
-		if v, ok := chatReq["max_tokens"]; ok {
-			codexReq["max_output_tokens"] = v
-		}
-	}
-
-	// `stop` has no Responses-API equivalent — drop it (passing it 400s).
+	// `max_tokens`, `max_output_tokens`, and `stop` are rejected by the Codex
+	// backend for chat completions, so drop them instead of returning upstream
+	// 400s for otherwise valid OpenAI-compatible requests.
 
 	// Chat tools are nested under `function`; Responses wants them flattened.
 	if tools, ok := chatReq["tools"].([]interface{}); ok {

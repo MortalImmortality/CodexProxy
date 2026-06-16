@@ -14,8 +14,8 @@ func TestBuildCodexRequestBody(t *testing.T) {
 			map[string]interface{}{"role": "user", "content": "hello"},
 		},
 		"stream":      true,
-		"temperature":  0.7,
-		"max_tokens":   100,
+		"temperature": 0.7,
+		"max_tokens":  100,
 	}
 
 	body, err := BuildCodexRequestBody(chatReq)
@@ -37,30 +37,80 @@ func TestBuildCodexRequestBody(t *testing.T) {
 	if result["input"] == nil {
 		t.Error("input is nil, want messages mapped to input")
 	}
-	if result["temperature"] != 0.7 {
-		t.Errorf("temperature = %v, want 0.7", result["temperature"])
+	if _, ok := result["temperature"]; ok {
+		t.Error("temperature should be dropped for reasoning models")
+	}
+	if _, ok := result["max_output_tokens"]; ok {
+		t.Error("max_tokens should not be mapped to max_output_tokens for Codex backend")
 	}
 	if result["messages"] != nil {
 		t.Error("messages should not be in codex request")
 	}
 }
 
-func TestBuildCodexRequestBody_PassthroughParams(t *testing.T) {
-	params := []string{"temperature", "top_p", "max_tokens", "max_output_tokens",
-		"stop", "tools", "tool_choice", "response_format"}
+func TestBuildCodexRequestBody_NonReasoningSamplingParams(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model":       "gpt-4.1",
+		"temperature": 0.7,
+		"top_p":       0.9,
+	}
+	body, _ := BuildCodexRequestBody(chatReq)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
 
-	for _, key := range params {
-		chatReq := map[string]interface{}{
-			"model": "test",
-			key:     "test-value",
-		}
-		body, _ := BuildCodexRequestBody(chatReq)
-		var result map[string]interface{}
-		json.Unmarshal(body, &result)
+	if result["temperature"] != 0.7 {
+		t.Errorf("temperature = %v, want 0.7", result["temperature"])
+	}
+	if result["top_p"] != 0.9 {
+		t.Errorf("top_p = %v, want 0.9", result["top_p"])
+	}
+}
 
-		if result[key] != "test-value" {
-			t.Errorf("param %s not passed through", key)
-		}
+func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model":       "gpt-4.1",
+		"tool_choice": "auto",
+		"tools": []interface{}{
+			map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        "lookup",
+					"description": "Lookup a value",
+					"parameters": map[string]interface{}{
+						"type": "object",
+					},
+					"strict": true,
+				},
+			},
+		},
+		"response_format": map[string]interface{}{
+			"type": "json_schema",
+			"json_schema": map[string]interface{}{
+				"name":   "answer",
+				"schema": map[string]interface{}{"type": "object"},
+				"strict": true,
+			},
+		},
+	}
+	body, _ := BuildCodexRequestBody(chatReq)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+
+	if result["tool_choice"] != "auto" {
+		t.Errorf("tool_choice = %v, want auto", result["tool_choice"])
+	}
+	tools := result["tools"].([]interface{})
+	tool := tools[0].(map[string]interface{})
+	if tool["name"] != "lookup" {
+		t.Errorf("tool name = %v, want lookup", tool["name"])
+	}
+	if _, ok := tool["function"]; ok {
+		t.Error("function tool should be flattened")
+	}
+	text := result["text"].(map[string]interface{})
+	format := text["format"].(map[string]interface{})
+	if format["type"] != "json_schema" || format["name"] != "answer" {
+		t.Errorf("format = %v, want flattened json_schema", format)
 	}
 }
 
