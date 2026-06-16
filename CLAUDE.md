@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 go build -o codex-proxy .
 ./codex-proxy login                 # authenticate via browser OAuth
-./codex-proxy serve                 # start proxy on :10531 (foreground)
+./codex-proxy serve                 # start proxy on 127.0.0.1:10531
 ./codex-proxy serve --host 0.0.0.0 --port 8080
 ./codex-proxy status                # show auth + service status
 ./codex-proxy logout                # remove ~/.codex-proxy/auth.json
