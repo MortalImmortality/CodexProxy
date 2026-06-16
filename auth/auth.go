@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,6 +30,17 @@ const (
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+func authPostForm(endpoint string, data url.Values) (*http.Response, error) {
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
+	req.Header.Set("Accept", "application/json")
+	return httpClient.Do(req)
+}
 
 // ──────────────────────────────────────────────
 // Token storage types (matches ~/.codex/auth.json)
@@ -216,7 +228,7 @@ func Login(deviceAuth bool) error {
 func loginDeviceCode() error {
 	fmt.Println("Requesting device code from OpenAI...")
 
-	resp, err := httpClient.PostForm(OAuthDeviceURL, url.Values{
+	resp, err := authPostForm(OAuthDeviceURL, url.Values{
 		"client_id": {OAuthClientID},
 		"scope":     {"openid profile email offline_access"},
 	})
@@ -297,7 +309,7 @@ func loginDeviceCode() error {
 }
 
 func pollDeviceToken(deviceCode string) (*TokenResponse, error) {
-	resp, err := httpClient.PostForm(OAuthTokenURL, url.Values{
+	resp, err := authPostForm(OAuthTokenURL, url.Values{
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"device_code": {deviceCode},
 		"client_id":   {OAuthClientID},
@@ -375,7 +387,7 @@ func (tm *TokenManager) refreshLocked() error {
 		return fmt.Errorf("no refresh token available")
 	}
 
-	resp, err := httpClient.PostForm(OAuthTokenURL, url.Values{
+	resp, err := authPostForm(OAuthTokenURL, url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {tm.authFile.Tokens.RefreshToken},
 		"client_id":     {OAuthClientID},
@@ -534,6 +546,7 @@ func DiscoverModels(accessToken string) ([]string, error) {
 	req, _ := http.NewRequest("GET", CodexBaseURL+"/models", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
