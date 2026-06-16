@@ -81,7 +81,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
-	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
+	mux.HandleFunc("/v1/images/generations", makeImageHandler(models))
 	mux.HandleFunc("/usage", handleUsage)
 	mux.HandleFunc("/v1/responses", handleResponses)
 	mux.HandleFunc("/v1/models", makeModelsHandler(models))
@@ -337,7 +337,17 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // /v1/images/generations → Codex image_generation tool
 // ──────────────────────────────────────────────
 
-func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+func makeImageHandler(models []string) http.HandlerFunc {
+	baseModel := "o4-mini"
+	if len(models) > 0 {
+		baseModel = models[0]
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		handleImageGenerations(w, r, baseModel)
+	}
+}
+
+func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel string) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "method_not_allowed", "POST only")
 		return
@@ -403,7 +413,7 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	imageTool["output_format"] = outputFormat
 
 	codexReq := map[string]interface{}{
-		"model":       "gpt-4o",
+		"model":       baseModel,
 		"stream":      true,
 		"store":       false,
 		"tool_choice": "image_generation",
