@@ -79,14 +79,22 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 		models = []string{"o3-pro", "gpt-5.4", "gpt-5.3-codex", "o4-mini"}
 	}
 
+	// baseModel for image requests is models[0] (a chat model), so the image
+	// model must be advertised at the end, never first.
+	baseModel := "o4-mini"
+	if len(models) > 0 {
+		baseModel = models[0]
+	}
+	listedModels := append(append([]string{}, models...), "gpt-image-2")
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
-	mux.HandleFunc("/v1/images/generations", makeImageHandler(models))
-	mux.HandleFunc("/v1/images/edits", makeImageEditHandler(models))
+	mux.HandleFunc("/v1/images/generations", makeImageHandler(baseModel))
+	mux.HandleFunc("/v1/images/edits", makeImageEditHandler(baseModel))
 	mux.HandleFunc("/usage", handleUsage)
 	mux.HandleFunc("/v1/responses", handleResponses)
-	mux.HandleFunc("/v1/models", makeModelsHandler(models))
+	mux.HandleFunc("/v1/models", makeModelsHandler(listedModels))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		healthy, reason := auth.Pool.IsHealthy()
@@ -340,21 +348,13 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // /v1/images/generations → Codex image_generation tool
 // ──────────────────────────────────────────────
 
-func makeImageHandler(models []string) http.HandlerFunc {
-	baseModel := "o4-mini"
-	if len(models) > 0 {
-		baseModel = models[0]
-	}
+func makeImageHandler(baseModel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handleImage(w, r, baseModel, false)
 	}
 }
 
-func makeImageEditHandler(models []string) http.HandlerFunc {
-	baseModel := "o4-mini"
-	if len(models) > 0 {
-		baseModel = models[0]
-	}
+func makeImageEditHandler(baseModel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handleImage(w, r, baseModel, true)
 	}
