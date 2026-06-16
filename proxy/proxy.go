@@ -82,6 +82,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
 	mux.HandleFunc("/v1/images/generations", makeImageHandler(models))
+	mux.HandleFunc("/v1/images/edits", makeImageEditHandler(models))
 	mux.HandleFunc("/usage", handleUsage)
 	mux.HandleFunc("/v1/responses", handleResponses)
 	mux.HandleFunc("/v1/models", makeModelsHandler(models))
@@ -126,6 +127,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 			"endpoints": []string{
 				"/v1/chat/completions",
 				"/v1/images/generations",
+				"/v1/images/edits",
 				"/v1/responses",
 				"/v1/models",
 				"/health",
@@ -343,11 +345,56 @@ func makeImageHandler(models []string) http.HandlerFunc {
 		baseModel = models[0]
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleImageGenerations(w, r, baseModel)
+		handleImage(w, r, baseModel, false)
 	}
 }
 
-func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel string) {
+func makeImageEditHandler(models []string) http.HandlerFunc {
+	baseModel := "o4-mini"
+	if len(models) > 0 {
+		baseModel = models[0]
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		handleImage(w, r, baseModel, true)
+	}
+}
+
+// extractImageRefs collects image URLs/data-URLs from the OpenAI images.edits
+// JSON body, which may carry them in `image` (string or array) or `images[]`.
+func extractImageRefs(raw map[string]interface{}) []string {
+	var refs []string
+
+	addVal := func(v interface{}) {
+		switch t := v.(type) {
+		case string:
+			if t != "" {
+				refs = append(refs, t)
+			}
+		case map[string]interface{}:
+			if u, ok := t["image_url"].(string); ok && u != "" {
+				refs = append(refs, u)
+			} else if u, ok := t["url"].(string); ok && u != "" {
+				refs = append(refs, u)
+			}
+		}
+	}
+
+	for _, key := range []string{"image", "images"} {
+		switch t := raw[key].(type) {
+		case string:
+			addVal(t)
+		case []interface{}:
+			for _, item := range t {
+				addVal(item)
+			}
+		case map[string]interface{}:
+			addVal(t)
+		}
+	}
+	return refs
+}
+
+func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdit bool) {
 	if r.Method != http.MethodPost {
 		writeError(w, 405, "method_not_allowed", "POST only")
 		return
@@ -364,27 +411,41 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel st
 		return
 	}
 
-	var req struct {
-		Prompt           string `json:"prompt"`
-		Model            string `json:"model"`
-		N                int    `json:"n"`
-		Size             string `json:"size"`
-		Quality          string `json:"quality"`
-		ResponseFormat   string `json:"response_format"`
-		Background       string `json:"background"`
-		OutputFormat     string `json:"output_format"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "invalid JSON")
+		writeError(w, 400, "bad_request", "invalid JSON (edits requires application/json)")
 		return
 	}
+
+	var req struct {
+		Prompt         string `json:"prompt"`
+		Model          string `json:"model"`
+		N              int    `json:"n"`
+		Size           string `json:"size"`
+		Quality        string `json:"quality"`
+		ResponseFormat string `json:"response_format"`
+		Background     string `json:"background"`
+		OutputFormat   string `json:"output_format"`
+	}
+	json.Unmarshal(body, &req)
 
 	if req.Prompt == "" {
 		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", "prompt is required")
 		return
 	}
+
+	var inputImages []string
+	if isEdit {
+		inputImages = extractImageRefs(raw)
+		if len(inputImages) == 0 {
+			stats.errorsTotal.Add(1)
+			writeError(w, 400, "bad_request", "edits requires at least one image (image or images[])")
+			return
+		}
+	}
+
 	imageModel := req.Model
 	if imageModel == "" {
 		imageModel = "gpt-image-2"
@@ -412,6 +473,19 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel st
 	}
 	imageTool["output_format"] = outputFormat
 
+	content := []interface{}{
+		map[string]interface{}{
+			"type": "input_text",
+			"text": req.Prompt,
+		},
+	}
+	for _, imgURL := range inputImages {
+		content = append(content, map[string]interface{}{
+			"type":      "input_image",
+			"image_url": imgURL,
+		})
+	}
+
 	codexReq := map[string]interface{}{
 		"model":        baseModel,
 		"stream":       true,
@@ -421,13 +495,8 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel st
 		"tools":        []interface{}{imageTool},
 		"input": []interface{}{
 			map[string]interface{}{
-				"role": "user",
-				"content": []interface{}{
-					map[string]interface{}{
-						"type": "input_text",
-						"text": req.Prompt,
-					},
-				},
+				"role":    "user",
+				"content": content,
 			},
 		},
 	}
