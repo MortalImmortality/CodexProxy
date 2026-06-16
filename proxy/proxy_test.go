@@ -334,3 +334,22 @@ func TestHandleImageRejectsOversizedMultipart(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
+
+func TestCORSAllowsXAPIKey(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
+	req.Header.Set("Access-Control-Request-Headers", "X-API-Key, Content-Type")
+	w := httptest.NewRecorder()
+
+	withCORS(next).ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	allow := w.Header().Get("Access-Control-Allow-Headers")
+	if !strings.Contains(allow, "X-API-Key") {
+		t.Fatalf("allowed headers = %q, want X-API-Key", allow)
+	}
+}
