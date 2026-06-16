@@ -152,7 +152,7 @@ const resp = await client.chat.completions.create({
 
 ## Token 管理
 
-- Token 存储在 `~/.codex/auth.json`（与 Codex CLI 共享）
+- Token 存储在 `~/.codex-proxy/auth.json`（与 Codex CLI 共享）
 - 如果你已经通过 `codex login` 登录过，可以直接 `codex-proxy serve`
 - Token 7 天判定为 stale，5 天时后台 goroutine 主动 refresh（不依赖请求触发）
 - 遇到上游 401 会自动 refresh-and-retry
@@ -182,16 +182,16 @@ const resp = await client.chat.completions.create({
 
 ```bash
 codex-proxy login                                    # 主账号
-codex-proxy login --auth-file ~/.codex/auth-alt.json # 副账号
+codex-proxy login --auth-file ~/.codex-proxy/auth-alt.json # 副账号
 ```
 
-### 2. 创建配置文件 `~/.codex/proxy.json`
+### 2. 创建配置文件 `~/.codex-proxy/proxy.json`
 
 ```json
 {
   "accounts": [
-    {"name": "main", "auth_file": "~/.codex/auth.json"},
-    {"name": "alt",  "auth_file": "~/.codex/auth-alt.json"}
+    {"name": "main", "auth_file": "~/.codex-proxy/auth.json"},
+    {"name": "alt",  "auth_file": "~/.codex-proxy/auth-alt.json"}
   ],
   "strategy": "round-robin"
 }
@@ -202,7 +202,7 @@ codex-proxy login --auth-file ~/.codex/auth-alt.json # 副账号
 ### 3. 启动
 
 ```bash
-codex-proxy serve                        # 自动检测 ~/.codex/proxy.json
+codex-proxy serve                        # 自动检测 ~/.codex-proxy/proxy.json
 codex-proxy serve --config /path/to.json # 指定配置文件
 ```
 

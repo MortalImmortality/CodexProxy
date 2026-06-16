@@ -64,7 +64,7 @@ func curlPostForm(endpoint string, data url.Values) ([]byte, int, error) {
 }
 
 // ──────────────────────────────────────────────
-// Token storage types (matches ~/.codex/auth.json)
+// Token storage types (matches ~/.codex-proxy/auth.json)
 // ──────────────────────────────────────────────
 
 type AuthFile struct {
@@ -162,7 +162,7 @@ func defaultAuthPath() string {
 		return filepath.Join(home, "auth.json")
 	}
 	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".codex", "auth.json")
+	return filepath.Join(homeDir, ".codex-proxy", "auth.json")
 }
 
 // ──────────────────────────────────────────────

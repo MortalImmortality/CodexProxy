@@ -41,7 +41,7 @@ func defaultConfigPath() string {
 		return filepath.Join(home, "proxy.json")
 	}
 	homeDir, _ := os.UserHomeDir()
-	return filepath.Join(homeDir, ".codex", "proxy.json")
+	return filepath.Join(homeDir, ".codex-proxy", "proxy.json")
 }
 
 func expandHome(path string) string {

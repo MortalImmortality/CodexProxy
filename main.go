@@ -165,7 +165,7 @@ Service management (Linux):
   codex-proxy logs                     Tail service logs
 
 Multi-account:
-  Create ~/.codex/proxy.json with multiple accounts for load balancing.
+  Create ~/.codex-proxy/proxy.json with multiple accounts for load balancing.
   See proxy.example.json for format.
 
 After login, any OpenAI-compatible client can use:

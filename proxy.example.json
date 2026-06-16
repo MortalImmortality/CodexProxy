@@ -2,11 +2,11 @@
   "accounts": [
     {
       "name": "main",
-      "auth_file": "~/.codex/auth.json"
+      "auth_file": "~/.codex-proxy/auth.json"
     },
     {
       "name": "alt",
-      "auth_file": "~/.codex/auth-alt.json"
+      "auth_file": "~/.codex-proxy/auth-alt.json"
     }
   ],
   "strategy": "round-robin",
