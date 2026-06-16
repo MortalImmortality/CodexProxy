@@ -809,9 +809,7 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 
 func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "OPTIONS" ||
-			r.URL.Path == "/health" ||
-			r.URL.Path == "/" {
+		if r.Method != "POST" {
 			next.ServeHTTP(w, r)
 			return
 		}
