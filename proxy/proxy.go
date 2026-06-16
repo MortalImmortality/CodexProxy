@@ -479,9 +479,16 @@ func parseImageSSE(body io.Reader) []imageResult {
 	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
 
 	var results []imageResult
+	var eventType string
 
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -506,10 +513,16 @@ func parseImageSSE(body io.Reader) []imageResult {
 			} `json:"response"`
 		}
 		if json.Unmarshal([]byte(data), &ev) != nil {
+			eventType = ""
 			continue
 		}
 
-		switch ev.Type {
+		evType := ev.Type
+		if evType == "" {
+			evType = eventType
+		}
+
+		switch evType {
 		case "response.output_item.done":
 			if ev.Item != nil && ev.Item.Type == "image_generation_call" && ev.Item.Result != "" {
 				results = append(results, imageResult{
@@ -529,6 +542,7 @@ func parseImageSSE(body io.Reader) []imageResult {
 				}
 			}
 		}
+		eventType = ""
 	}
 	return results
 }
