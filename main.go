@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -21,15 +23,13 @@ func main() {
 
 	switch os.Args[1] {
 	case "login":
-		authFile := ""
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--auth-file" && i+1 < len(os.Args) {
-				authFile = os.Args[i+1]
-				i++
-			}
+		authFile, err := parseLoginArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid login args: %v\n", err)
+			os.Exit(1)
 		}
 		if authFile != "" {
-			auth.SetManagerPath(expandHome(authFile))
+			auth.SetManagerPath(authFile)
 		}
 		if err := auth.Login(); err != nil {
 			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
@@ -41,28 +41,15 @@ func main() {
 			Level: slog.LevelInfo,
 		})))
 
-		host := "127.0.0.1"
-		port := "10531"
-		configPath := ""
-
-		for i := 2; i < len(os.Args); i++ {
-			if i+1 >= len(os.Args) {
-				break
-			}
-			switch os.Args[i] {
-			case "--host":
-				host = os.Args[i+1]
-				i++
-			case "--port":
-				port = os.Args[i+1]
-				i++
-			case "--config":
-				configPath = os.Args[i+1]
-				i++
-			}
+		serveOpts, err := parseServeArgs(os.Args[2:])
+		if err != nil {
+			slog.Error("invalid serve args", "error", err)
+			os.Exit(1)
 		}
+		host := serveOpts.host
+		port := serveOpts.port
 
-		initPool(configPath, &host, &port)
+		initPool(serveOpts.configPath, &host, &port)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -177,6 +164,50 @@ func initPool(configPath string, host, port *string) {
 	slog.Info("multi-account mode",
 		"accounts", len(cfg.Accounts),
 		"strategy", strategy)
+}
+
+type serveOptions struct {
+	host       string
+	port       string
+	configPath string
+}
+
+func parseLoginArgs(args []string) (string, error) {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	authFile := fs.String("auth-file", "", "auth file path")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() != 0 {
+		return "", fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if *authFile == "" {
+		return "", nil
+	}
+	return expandHome(*authFile), nil
+}
+
+func parseServeArgs(args []string) (serveOptions, error) {
+	opts := serveOptions{
+		host: "127.0.0.1",
+		port: "10531",
+	}
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.host, "host", opts.host, "listen host")
+	fs.StringVar(&opts.port, "port", opts.port, "listen port")
+	fs.StringVar(&opts.configPath, "config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if opts.configPath != "" {
+		opts.configPath = expandHome(opts.configPath)
+	}
+	return opts, nil
 }
 
 func cmdUsage() {
