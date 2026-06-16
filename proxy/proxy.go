@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -209,6 +210,8 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 		client = streamClient
 	}
 
+	accountID := handle.AccountID
+	sessionID := newUUID()
 	refreshed := false
 	var resp *http.Response
 
@@ -217,6 +220,15 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "codex-proxy/1.0")
+		// Headers the Codex CLI sends; backend expects the Responses beta flag,
+		// originator, a session id, and SSE Accept. account-id when known.
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		req.Header.Set("originator", "codex_cli_rs")
+		req.Header.Set("session_id", sessionID)
+		req.Header.Set("Accept", "text/event-stream")
+		if accountID != "" {
+			req.Header.Set("chatgpt-account-id", accountID)
+		}
 
 		resp, err = client.Do(req)
 		if err != nil {
@@ -268,6 +280,17 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 	return resp, nil
 }
 
+// newUUID returns a random RFC-4122 v4 UUID string for the session_id header.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func retryDelay(resp *http.Response, attempt int) time.Duration {
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
 		if secs, err := strconv.Atoi(ra); err == nil {
@@ -309,9 +332,17 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isStreaming, _ := chatReq["stream"].(bool)
+	clientWantsStream, _ := chatReq["stream"].(bool)
 	model, _ := chatReq["model"].(string)
+	includeUsage := false
+	if so, ok := chatReq["stream_options"].(map[string]interface{}); ok {
+		includeUsage, _ = so["include_usage"].(bool)
+	}
 
+	// The Codex backend only emits SSE for /responses, so always stream
+	// upstream. For a non-streaming client we aggregate the SSE into one JSON
+	// chat.completion below.
+	chatReq["stream"] = true
 	codexBody, err := auth.BuildCodexRequestBody(chatReq)
 	if err != nil {
 		stats.errorsTotal.Add(1)
@@ -319,7 +350,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, isStreaming)
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
 	if err != nil {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
@@ -338,14 +369,88 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isStreaming {
-		streamChatCompletion(w, resp, model)
+	if clientWantsStream {
+		streamChatCompletion(w, resp, model, includeUsage)
 	} else {
-		respBody, _ := io.ReadAll(resp.Body)
-		converted := convertToOpenAIFormat(respBody, chatReq)
+		respObj := aggregateCodexResponse(resp.Body)
+		if respObj == nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 502, "upstream_error", "no response from upstream")
+			return
+		}
+		converted := convertToOpenAIFormat(respObj, chatReq)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(converted)
 	}
+}
+
+// aggregateCodexResponse scans a Codex SSE stream and returns the final
+// `response` object JSON from the response.completed/done event, so a
+// non-streaming client gets a single chat.completion. Falls back to a
+// synthesized response built from output_text deltas if no completed event
+// carries a response object.
+func aggregateCodexResponse(body io.Reader) []byte {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+
+	var textBuf strings.Builder
+	var eventType string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var ev struct {
+			Type     string          `json:"type"`
+			Delta    string          `json:"delta"`
+			Response json.RawMessage `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			eventType = ""
+			continue
+		}
+		evType := ev.Type
+		if evType == "" {
+			evType = eventType
+		}
+
+		switch evType {
+		case "response.output_text.delta":
+			textBuf.WriteString(ev.Delta)
+		case "response.completed", "response.done":
+			if len(ev.Response) > 0 {
+				return ev.Response
+			}
+		}
+		eventType = ""
+	}
+
+	if textBuf.Len() == 0 {
+		return nil
+	}
+	// Fallback: no response object seen, wrap accumulated text.
+	synth := map[string]interface{}{
+		"output": []interface{}{
+			map[string]interface{}{
+				"type": "message",
+				"content": []interface{}{
+					map[string]interface{}{"type": "output_text", "text": textBuf.String()},
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(synth)
+	return b
 }
 
 // ──────────────────────────────────────────────
@@ -761,7 +866,7 @@ func makeModelsHandler(models []string) http.HandlerFunc {
 // SSE streaming: Codex format → OpenAI chat completion chunks
 // ──────────────────────────────────────────────
 
-func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model string) {
+func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model string, includeUsage bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, 500, "internal", "streaming not supported")
@@ -894,6 +999,26 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 			}
 			chunk := buildStreamChunk(respID, model, created, false, "", fr)
 			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			if includeUsage {
+				var ev struct {
+					Response struct {
+						Usage json.RawMessage `json:"usage"`
+					} `json:"response"`
+				}
+				if json.Unmarshal([]byte(data), &ev) == nil && len(ev.Response.Usage) > 0 {
+					if u := convertUsage(ev.Response.Usage); u != nil {
+						usageChunk, _ := json.Marshal(map[string]interface{}{
+							"id":      respID,
+							"object":  "chat.completion.chunk",
+							"created": created,
+							"model":   model,
+							"choices": []interface{}{},
+							"usage":   u,
+						})
+						fmt.Fprintf(w, "data: %s\n\n", usageChunk)
+					}
+				}
+			}
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
@@ -1053,11 +1178,50 @@ func convertToOpenAIFormat(respBody []byte, chatReq map[string]interface{}) []by
 		"created": time.Now().Unix(),
 		"model":   model,
 		"choices": []interface{}{choice},
-		"usage":   codexResp["usage"],
+	}
+	if raw, err := json.Marshal(codexResp["usage"]); err == nil {
+		if u := convertUsage(raw); u != nil {
+			openaiResp["usage"] = u
+		}
 	}
 
 	result, _ := json.Marshal(openaiResp)
 	return result
+}
+
+// convertUsage maps Responses-API usage (input_tokens/output_tokens) to the
+// Chat-Completions shape (prompt_tokens/completion_tokens). Returns nil if the
+// raw usage is absent or unparseable.
+func convertUsage(raw []byte) map[string]interface{} {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var u struct {
+		InputTokens        int `json:"input_tokens"`
+		OutputTokens       int `json:"output_tokens"`
+		TotalTokens        int `json:"total_tokens"`
+		OutputTokensDetail struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
+	}
+	if json.Unmarshal(raw, &u) != nil {
+		return nil
+	}
+	total := u.TotalTokens
+	if total == 0 {
+		total = u.InputTokens + u.OutputTokens
+	}
+	out := map[string]interface{}{
+		"prompt_tokens":     u.InputTokens,
+		"completion_tokens": u.OutputTokens,
+		"total_tokens":      total,
+	}
+	if u.OutputTokensDetail.ReasoningTokens > 0 {
+		out["completion_tokens_details"] = map[string]interface{}{
+			"reasoning_tokens": u.OutputTokensDetail.ReasoningTokens,
+		}
+	}
+	return out
 }
 
 func extractMessage(resp map[string]interface{}) (map[string]interface{}, string) {
@@ -1192,7 +1356,9 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 
 func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
+		// Public, unauthenticated paths. Everything else (including GET
+		// /usage, /metrics, /v1/models) requires a valid API key.
+		if r.Method == "OPTIONS" || r.URL.Path == "/health" || r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return
 		}

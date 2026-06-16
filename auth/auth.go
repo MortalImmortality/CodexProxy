@@ -433,6 +433,42 @@ func (tm *TokenManager) GetAccessToken() string {
 	return tm.authFile.Tokens.AccessToken
 }
 
+// AccountID returns the ChatGPT account id sent as the `chatgpt-account-id`
+// header. Prefers the stored value, falling back to the id_token JWT claim.
+func (tm *TokenManager) AccountID() string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if tm.authFile == nil {
+		return ""
+	}
+	if id := tm.authFile.Tokens.AccountID; id != "" {
+		return id
+	}
+	return accountIDFromJWT(tm.authFile.Tokens.IDToken)
+}
+
+// accountIDFromJWT decodes an OpenAI id_token and extracts
+// auth["chatgpt_account_id"]. Returns "" on any parse failure.
+func accountIDFromJWT(idToken string) string {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Auth struct {
+			ChatGPTAccountID string `json:"chatgpt_account_id"`
+		} `json:"https://api.openai.com/auth"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	return claims.Auth.ChatGPTAccountID
+}
+
 // ──────────────────────────────────────────────
 // File I/O
 // ──────────────────────────────────────────────
@@ -798,16 +834,107 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 		codexReq["instructions"] = "You are a helpful assistant."
 	}
 
-	for _, key := range []string{
-		"temperature", "top_p", "max_tokens", "max_output_tokens",
-		"stop", "tools", "tool_choice", "response_format",
-	} {
+	// Params the Responses API accepts verbatim.
+	for _, key := range []string{"max_output_tokens", "tool_choice"} {
 		if v, ok := chatReq[key]; ok {
 			codexReq[key] = v
 		}
 	}
 
+	// temperature/top_p are rejected by reasoning models (gpt-5*, o-series,
+	// codex). Codex CLI never sends them for those. Forward only otherwise.
+	model, _ := chatReq["model"].(string)
+	if !isReasoningModel(model) {
+		for _, key := range []string{"temperature", "top_p"} {
+			if v, ok := chatReq[key]; ok {
+				codexReq[key] = v
+			}
+		}
+	}
+
+	// Chat `max_tokens` → Responses `max_output_tokens` (no native max_tokens).
+	// Do not clobber an explicit max_output_tokens.
+	if _, ok := codexReq["max_output_tokens"]; !ok {
+		if v, ok := chatReq["max_tokens"]; ok {
+			codexReq["max_output_tokens"] = v
+		}
+	}
+
+	// `stop` has no Responses-API equivalent — drop it (passing it 400s).
+
+	// Chat tools are nested under `function`; Responses wants them flattened.
+	if tools, ok := chatReq["tools"].([]interface{}); ok {
+		codexReq["tools"] = convertTools(tools)
+	}
+
+	// Chat `response_format` → Responses `text.format`.
+	if rf, ok := chatReq["response_format"].(map[string]interface{}); ok {
+		if format := convertResponseFormat(rf); format != nil {
+			codexReq["text"] = map[string]interface{}{"format": format}
+		}
+	}
+
 	return json.Marshal(codexReq)
+}
+
+// convertTools flattens Chat-Completions function tools into Responses shape.
+// Chat:      {"type":"function","function":{"name","description","parameters","strict"}}
+// Responses: {"type":"function","name","description","parameters","strict"}
+// Non-function tools (e.g. web_search) pass through unchanged.
+func convertTools(tools []interface{}) []interface{} {
+	out := make([]interface{}, 0, len(tools))
+	for _, t := range tools {
+		tool, ok := t.(map[string]interface{})
+		if !ok {
+			out = append(out, t)
+			continue
+		}
+		fn, ok := tool["function"].(map[string]interface{})
+		if tool["type"] != "function" || !ok {
+			out = append(out, tool)
+			continue
+		}
+		flat := map[string]interface{}{"type": "function"}
+		for _, k := range []string{"name", "description", "parameters", "strict"} {
+			if v, ok := fn[k]; ok {
+				flat[k] = v
+			}
+		}
+		out = append(out, flat)
+	}
+	return out
+}
+
+// convertResponseFormat maps a Chat `response_format` object to the Responses
+// `text.format` object. json_schema is flattened (no nested json_schema key).
+func convertResponseFormat(rf map[string]interface{}) map[string]interface{} {
+	t, _ := rf["type"].(string)
+	switch t {
+	case "json_schema":
+		format := map[string]interface{}{"type": "json_schema"}
+		if js, ok := rf["json_schema"].(map[string]interface{}); ok {
+			for _, k := range []string{"name", "schema", "strict", "description"} {
+				if v, ok := js[k]; ok {
+					format[k] = v
+				}
+			}
+		}
+		return format
+	case "json_object", "text":
+		return map[string]interface{}{"type": t}
+	default:
+		return nil
+	}
+}
+
+// isReasoningModel reports whether the model rejects sampling params
+// (temperature/top_p) — the gpt-5 family, o-series, and codex models.
+func isReasoningModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-5") ||
+		strings.HasPrefix(model, "o1") ||
+		strings.HasPrefix(model, "o3") ||
+		strings.HasPrefix(model, "o4") ||
+		strings.Contains(model, "codex")
 }
 
 func convertContentParts(parts []interface{}, role string) {

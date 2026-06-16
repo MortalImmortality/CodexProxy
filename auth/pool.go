@@ -16,8 +16,9 @@ type AccountConfig struct {
 }
 
 type TokenHandle struct {
-	Manager *TokenManager
-	Token   string
+	Manager   *TokenManager
+	Token     string
+	AccountID string
 }
 
 func (h *TokenHandle) Refresh() (string, error) {
@@ -77,7 +78,7 @@ func (p *TokenPool) Acquire() (*TokenHandle, error) {
 			if alt != tm {
 				token, err = alt.EnsureFreshToken()
 				if err == nil {
-					return &TokenHandle{Manager: alt, Token: token}, nil
+					return &TokenHandle{Manager: alt, Token: token, AccountID: alt.AccountID()}, nil
 				}
 				alt.MarkFailed(err)
 			}
@@ -85,7 +86,7 @@ func (p *TokenPool) Acquire() (*TokenHandle, error) {
 		return nil, fmt.Errorf("all accounts failed, last: %w", err)
 	}
 
-	return &TokenHandle{Manager: tm, Token: token}, nil
+	return &TokenHandle{Manager: tm, Token: token, AccountID: tm.AccountID()}, nil
 }
 
 func (p *TokenPool) pick(candidates []*TokenManager) *TokenManager {
