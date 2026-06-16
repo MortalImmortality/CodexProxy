@@ -68,8 +68,13 @@ func TestBuildCodexRequestBody_NonReasoningSamplingParams(t *testing.T) {
 
 func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
 	chatReq := map[string]interface{}{
-		"model":       "gpt-4.1",
-		"tool_choice": "auto",
+		"model": "gpt-4.1",
+		"tool_choice": map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name": "lookup",
+			},
+		},
 		"tools": []interface{}{
 			map[string]interface{}{
 				"type": "function",
@@ -96,8 +101,9 @@ func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
 	var result map[string]interface{}
 	json.Unmarshal(body, &result)
 
-	if result["tool_choice"] != "auto" {
-		t.Errorf("tool_choice = %v, want auto", result["tool_choice"])
+	toolChoice := result["tool_choice"].(map[string]interface{})
+	if toolChoice["name"] != "lookup" {
+		t.Errorf("tool_choice = %v, want flattened lookup", toolChoice)
 	}
 	tools := result["tools"].([]interface{})
 	tool := tools[0].(map[string]interface{})

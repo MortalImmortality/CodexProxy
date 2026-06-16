@@ -835,10 +835,8 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	}
 
 	// Params the Codex backend accepts verbatim.
-	for _, key := range []string{"tool_choice"} {
-		if v, ok := chatReq[key]; ok {
-			codexReq[key] = v
-		}
+	if v, ok := chatReq["tool_choice"]; ok {
+		codexReq["tool_choice"] = convertToolChoice(v)
 	}
 
 	// temperature/top_p are rejected by reasoning models (gpt-5*, o-series,
@@ -869,6 +867,28 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	}
 
 	return json.Marshal(codexReq)
+}
+
+func convertToolChoice(v interface{}) interface{} {
+	choice, ok := v.(map[string]interface{})
+	if !ok {
+		return v
+	}
+	if choice["type"] != "function" {
+		return choice
+	}
+	fn, ok := choice["function"].(map[string]interface{})
+	if !ok {
+		return choice
+	}
+	name, _ := fn["name"].(string)
+	if name == "" {
+		return choice
+	}
+	return map[string]interface{}{
+		"type": "function",
+		"name": name,
+	}
 }
 
 // convertTools flattens Chat-Completions function tools into Responses shape.

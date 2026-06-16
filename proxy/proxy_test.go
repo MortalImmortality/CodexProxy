@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -157,6 +158,43 @@ func TestAggregateCodexResponseUsesDeltasWhenCompletedHasNoOutput(t *testing.T) 
 	}
 }
 
+func TestAggregateCodexResponseUsesFunctionCallDone(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\"city\":\"Beijing\"}","call_id":"call_1","name":"get_weather"},"output_index":0}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4},"output":[]}}`,
+		``,
+	}, "\n")
+
+	respBody, err := aggregateCodexResponse(strings.NewReader(sse))
+	if err != nil {
+		t.Fatalf("aggregateCodexResponse: %v", err)
+	}
+	result := convertToOpenAIFormat(respBody, map[string]interface{}{"model": "gpt-5.4-mini"})
+
+	var openaiResp map[string]interface{}
+	if err := json.Unmarshal(result, &openaiResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	choices := openaiResp["choices"].([]interface{})
+	choice := choices[0].(map[string]interface{})
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v, want tool_calls", choice["finish_reason"])
+	}
+	msg := choice["message"].(map[string]interface{})
+	toolCalls := msg["tool_calls"].([]interface{})
+	call := toolCalls[0].(map[string]interface{})
+	if call["id"] != "call_1" {
+		t.Errorf("call id = %v, want call_1", call["id"])
+	}
+	fn := call["function"].(map[string]interface{})
+	if fn["name"] != "get_weather" || fn["arguments"] != `{"city":"Beijing"}` {
+		t.Errorf("function = %v", fn)
+	}
+}
+
 func TestAggregateCodexResponseReturnsScannerError(t *testing.T) {
 	oversizedLine := "data: " + strings.Repeat("x", maxSSEEventSize+1)
 	respBody, err := aggregateCodexResponse(strings.NewReader(oversizedLine))
@@ -192,6 +230,34 @@ func TestScanSSESupportsMultilineData(t *testing.T) {
 	}
 	if got[0].data != "first\nsecond" {
 		t.Errorf("data = %q, want joined data", got[0].data)
+	}
+}
+
+func TestStreamChatCompletionInitializesToolCallFromAdded(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"get_weather"},"output_index":0}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","delta":"{\"city\":\"Beijing\"}","output_index":0}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{}}`,
+		``,
+	}, "\n")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sse))}
+	w := httptest.NewRecorder()
+
+	streamChatCompletion(w, resp, "gpt-5.4-mini", false)
+	body := w.Body.String()
+	if !strings.Contains(body, `"index":0`) {
+		t.Fatalf("stream missing tool index 0:\n%s", body)
+	}
+	if strings.Contains(body, `"index":-1`) {
+		t.Fatalf("stream contains invalid tool index -1:\n%s", body)
+	}
+	if !strings.Contains(body, `"id":"call_1"`) || !strings.Contains(body, `"name":"get_weather"`) {
+		t.Fatalf("stream missing initial tool call metadata:\n%s", body)
 	}
 }
 

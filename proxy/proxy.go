@@ -467,6 +467,7 @@ func scanSSE(body io.Reader, maxEventSize int, handle func(sseEvent) error) erro
 func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 	var textBuf strings.Builder
 	var completedResponse json.RawMessage
+	var outputItems []interface{}
 
 	err := scanSSE(body, maxSSEEventSize, func(sse sseEvent) error {
 		data := sse.data
@@ -477,6 +478,7 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 		var ev struct {
 			Type     string          `json:"type"`
 			Delta    string          `json:"delta"`
+			Item     json.RawMessage `json:"item"`
 			Response json.RawMessage `json:"response"`
 		}
 		if json.Unmarshal([]byte(data), &ev) != nil {
@@ -490,6 +492,10 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 		switch evType {
 		case "response.output_text.delta":
 			textBuf.WriteString(ev.Delta)
+		case "response.output_item.done":
+			if item := normalizedOutputItem(ev.Item); item != nil {
+				outputItems = append(outputItems, item)
+			}
 		case "response.completed", "response.done":
 			if len(ev.Response) > 0 {
 				completedResponse = ev.Response
@@ -503,8 +509,8 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 	}
 
 	if completedResponse != nil {
-		if textBuf.Len() > 0 {
-			if patched := injectOutputTextIfMissing(completedResponse, textBuf.String()); patched != nil {
+		if len(outputItems) > 0 || textBuf.Len() > 0 {
+			if patched := injectOutputIfMissing(completedResponse, outputItems, textBuf.String()); patched != nil {
 				return patched, nil
 			}
 		}
@@ -518,7 +524,22 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 	return synthesizeTextResponse(textBuf.String()), nil
 }
 
-func injectOutputTextIfMissing(respBody []byte, text string) []byte {
+func normalizedOutputItem(raw json.RawMessage) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var item map[string]interface{}
+	if json.Unmarshal(raw, &item) != nil {
+		return nil
+	}
+	if item["type"] == "function_call" {
+		delete(item, "id")
+		delete(item, "status")
+	}
+	return item
+}
+
+func injectOutputIfMissing(respBody []byte, outputItems []interface{}, text string) []byte {
 	var resp map[string]interface{}
 	if json.Unmarshal(respBody, &resp) != nil {
 		return nil
@@ -526,13 +547,17 @@ func injectOutputTextIfMissing(respBody []byte, text string) []byte {
 	if responseHasOutput(resp) {
 		return nil
 	}
-	resp["output"] = []interface{}{
-		map[string]interface{}{
-			"type": "message",
-			"content": []interface{}{
-				map[string]interface{}{"type": "output_text", "text": text},
+	if len(outputItems) > 0 {
+		resp["output"] = outputItems
+	} else if text != "" {
+		resp["output"] = []interface{}{
+			map[string]interface{}{
+				"type": "message",
+				"content": []interface{}{
+					map[string]interface{}{"type": "output_text", "text": text},
+				},
 			},
-		},
+		}
 	}
 	b, _ := json.Marshal(resp)
 	return b
@@ -1077,17 +1102,42 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				flusher.Flush()
 			}
 
+		case "response.output_item.added":
+			var ev struct {
+				OutputIndex int `json:"output_index"`
+				Item        struct {
+					Type   string `json:"type"`
+					CallID string `json:"call_id"`
+					Name   string `json:"name"`
+				} `json:"item"`
+			}
+			if json.Unmarshal([]byte(data), &ev) == nil && ev.Item.Type == "function_call" {
+				hasToolCalls = true
+				toolCallIndex = ev.OutputIndex
+				chunk := buildToolCallChunk(respID, model, created, firstContent, toolCallIndex, ev.Item.CallID, ev.Item.Name, "")
+				firstContent = false
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+					return err
+				}
+				flusher.Flush()
+			}
+
 		case "response.function_call_arguments.delta":
 			var ev struct {
-				Delta  string `json:"delta"`
-				CallID string `json:"call_id"`
-				Name   string `json:"name"`
+				Delta       string `json:"delta"`
+				CallID      string `json:"call_id"`
+				Name        string `json:"name"`
+				OutputIndex *int   `json:"output_index"`
 			}
 			if err := json.Unmarshal([]byte(data), &ev); err != nil {
 				return nil
 			}
 			if ev.Name != "" {
-				toolCallIndex++
+				if ev.OutputIndex != nil {
+					toolCallIndex = *ev.OutputIndex
+				} else {
+					toolCallIndex++
+				}
 				hasToolCalls = true
 				chunk := buildToolCallChunk(respID, model, created, firstContent, toolCallIndex, ev.CallID, ev.Name, ev.Delta)
 				firstContent = false
@@ -1095,6 +1145,9 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 					return err
 				}
 			} else {
+				if ev.OutputIndex != nil {
+					toolCallIndex = *ev.OutputIndex
+				}
 				chunk := buildToolCallDeltaChunk(respID, model, created, toolCallIndex, ev.Delta)
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
 					return err
