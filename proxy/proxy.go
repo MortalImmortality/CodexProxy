@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ const (
 	upstreamBase       = "https://chatgpt.com/backend-api/codex"
 	maxRequestBodySize = 10 << 20 // 10 MB
 	maxRetries         = 2
+	maxSSEEventSize    = 32 << 20 // 32 MB
 )
 
 var (
@@ -391,31 +393,85 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type sseEvent struct {
+	event string
+	data  string
+}
+
+var errSSEDone = errors.New("sse done")
+
+func scanSSE(body io.Reader, maxEventSize int, handle func(sseEvent) error) error {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64*1024), maxEventSize)
+
+	var eventType string
+	var dataLines []string
+
+	flush := func() error {
+		if eventType == "" && len(dataLines) == 0 {
+			return nil
+		}
+		err := handle(sseEvent{
+			event: eventType,
+			data:  strings.Join(dataLines, "\n"),
+		})
+		eventType = ""
+		dataLines = nil
+		if errors.Is(err, errSSEDone) {
+			return errSSEDone
+		}
+		return err
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if err := flush(); err != nil {
+				if errors.Is(err, errSSEDone) {
+					return nil
+				}
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, found := strings.Cut(line, ":")
+		if !found {
+			value = ""
+		} else if strings.HasPrefix(value, " ") {
+			value = strings.TrimPrefix(value, " ")
+		}
+		switch field {
+		case "event":
+			eventType = value
+		case "data":
+			dataLines = append(dataLines, value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if err := flush(); err != nil && !errors.Is(err, errSSEDone) {
+		return err
+	}
+	return nil
+}
+
 // aggregateCodexResponse scans a Codex SSE stream and returns the final
 // `response` object JSON from the response.completed/done event, so a
 // non-streaming client gets a single chat.completion. Falls back to a
 // synthesized response built from output_text deltas if no completed event
 // carries a response object.
 func aggregateCodexResponse(body io.Reader) ([]byte, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-
 	var textBuf strings.Builder
-	var eventType string
 	var completedResponse json.RawMessage
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-			continue
-		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
+	err := scanSSE(body, maxSSEEventSize, func(sse sseEvent) error {
+		data := sse.data
 		if data == "[DONE]" {
-			break
+			return errSSEDone
 		}
 
 		var ev struct {
@@ -424,12 +480,11 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 			Response json.RawMessage `json:"response"`
 		}
 		if json.Unmarshal([]byte(data), &ev) != nil {
-			eventType = ""
-			continue
+			return nil
 		}
 		evType := ev.Type
 		if evType == "" {
-			evType = eventType
+			evType = sse.event
 		}
 
 		switch evType {
@@ -438,9 +493,13 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 		case "response.completed", "response.done":
 			if len(ev.Response) > 0 {
 				completedResponse = ev.Response
+				return errSSEDone
 			}
 		}
-		eventType = ""
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upstream stream read failed: %w", err)
 	}
 
 	if completedResponse != nil {
@@ -452,9 +511,6 @@ func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 		return completedResponse, nil
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("upstream stream read failed: %w", err)
-	}
 	if textBuf.Len() == 0 {
 		return nil, nil
 	}
@@ -789,26 +845,12 @@ type imageResult struct {
 }
 
 func parseImageSSE(body io.Reader) ([]imageResult, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
-
 	var results []imageResult
-	var eventType string
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-			continue
-		}
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
+	err := scanSSE(body, maxSSEEventSize, func(sse sseEvent) error {
+		data := sse.data
 		if data == "[DONE]" {
-			break
+			return errSSEDone
 		}
 
 		var ev struct {
@@ -827,13 +869,12 @@ func parseImageSSE(body io.Reader) ([]imageResult, error) {
 			} `json:"response"`
 		}
 		if json.Unmarshal([]byte(data), &ev) != nil {
-			eventType = ""
-			continue
+			return nil
 		}
 
 		evType := ev.Type
 		if evType == "" {
-			evType = eventType
+			evType = sse.event
 		}
 
 		switch evType {
@@ -856,9 +897,9 @@ func parseImageSSE(body io.Reader) ([]imageResult, error) {
 				}
 			}
 		}
-		eventType = ""
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, fmt.Errorf("upstream image stream read failed: %w", err)
 	}
 	return results, nil
@@ -960,31 +1001,19 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
-
 	created := time.Now().Unix()
 	respID := fmt.Sprintf("chatcmpl-%d", created)
 	firstContent := true
 	hasToolCalls := false
 	toolCallIndex := -1
-	var eventType string
+	doneSent := false
 
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-			continue
+	err := scanSSE(resp.Body, maxSSEEventSize, func(sse sseEvent) error {
+		data := sse.data
+		if data == "[DONE]" {
+			return errSSEDone
 		}
-
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-
-		evType := eventType
+		evType := sse.event
 		if evType == "" {
 			var probe struct {
 				Type string `json:"type"`
@@ -1015,12 +1044,12 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				Delta string `json:"delta"`
 			}
 			if err := json.Unmarshal([]byte(data), &delta); err != nil {
-				continue
+				return nil
 			}
 			chunk := buildStreamChunk(respID, model, created, firstContent, delta.Delta, "")
 			firstContent = false
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
-				return
+				return err
 			}
 			flusher.Flush()
 
@@ -1043,7 +1072,7 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				chunk := buildStreamChunk(respID, model, created, firstContent, content, "")
 				firstContent = false
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
-					return
+					return err
 				}
 				flusher.Flush()
 			}
@@ -1055,7 +1084,7 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				Name   string `json:"name"`
 			}
 			if err := json.Unmarshal([]byte(data), &ev); err != nil {
-				continue
+				return nil
 			}
 			if ev.Name != "" {
 				toolCallIndex++
@@ -1063,12 +1092,12 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				chunk := buildToolCallChunk(respID, model, created, firstContent, toolCallIndex, ev.CallID, ev.Name, ev.Delta)
 				firstContent = false
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
-					return
+					return err
 				}
 			} else {
 				chunk := buildToolCallDeltaChunk(respID, model, created, toolCallIndex, ev.Delta)
 				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
-					return
+					return err
 				}
 			}
 			flusher.Flush()
@@ -1079,7 +1108,9 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				fr = "tool_calls"
 			}
 			chunk := buildStreamChunk(respID, model, created, false, "", fr)
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+				return err
+			}
 			if includeUsage {
 				var ev struct {
 					Response struct {
@@ -1096,23 +1127,29 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 							"choices": []interface{}{},
 							"usage":   u,
 						})
-						fmt.Fprintf(w, "data: %s\n\n", usageChunk)
+						if _, err := fmt.Fprintf(w, "data: %s\n\n", usageChunk); err != nil {
+							return err
+						}
 					}
 				}
 			}
-			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if _, err := fmt.Fprintf(w, "data: [DONE]\n\n"); err != nil {
+				return err
+			}
 			flusher.Flush()
-			return
+			doneSent = true
+			return errSSEDone
 		}
+		return nil
+	})
 
-		eventType = ""
-	}
-
-	if err := scanner.Err(); err != nil {
+	if err != nil {
 		slog.Error("stream read error", "error", err)
 	}
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	if !doneSent {
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
 }
 
 func buildStreamChunk(id, model string, created int64, includeRole bool, content, finishReason string) []byte {

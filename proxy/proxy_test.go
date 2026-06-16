@@ -158,13 +158,40 @@ func TestAggregateCodexResponseUsesDeltasWhenCompletedHasNoOutput(t *testing.T) 
 }
 
 func TestAggregateCodexResponseReturnsScannerError(t *testing.T) {
-	oversizedLine := "data: " + strings.Repeat("x", 10*1024*1024+1)
+	oversizedLine := "data: " + strings.Repeat("x", maxSSEEventSize+1)
 	respBody, err := aggregateCodexResponse(strings.NewReader(oversizedLine))
 	if err == nil {
 		t.Fatal("expected scanner error for oversized SSE line")
 	}
 	if respBody != nil {
 		t.Fatalf("response body = %s, want nil", respBody)
+	}
+}
+
+func TestScanSSESupportsMultilineData(t *testing.T) {
+	raw := strings.Join([]string{
+		"event: joined",
+		"data: first",
+		"data: second",
+		"",
+	}, "\n")
+
+	var got []sseEvent
+	if err := scanSSE(strings.NewReader(raw), maxSSEEventSize, func(ev sseEvent) error {
+		got = append(got, ev)
+		return nil
+	}); err != nil {
+		t.Fatalf("scanSSE: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("events = %d, want 1", len(got))
+	}
+	if got[0].event != "joined" {
+		t.Errorf("event = %q, want joined", got[0].event)
+	}
+	if got[0].data != "first\nsecond" {
+		t.Errorf("data = %q, want joined data", got[0].data)
 	}
 }
 
