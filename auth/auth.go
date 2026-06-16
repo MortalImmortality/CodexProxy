@@ -590,6 +590,7 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	codexReq := map[string]interface{}{
 		"model":  chatReq["model"],
 		"stream": chatReq["stream"],
+		"store":  false,
 	}
 
 	if messages, ok := chatReq["messages"]; ok {
