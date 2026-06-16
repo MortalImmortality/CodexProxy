@@ -28,6 +28,7 @@ func (h *TokenHandle) Refresh() (string, error) {
 		return "", err
 	}
 	h.Token = token
+	h.AccountID = h.Manager.AccountID()
 	return token, nil
 }
 

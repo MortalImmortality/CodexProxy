@@ -249,7 +249,9 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 				}
 				handle = handle2
 				token = handle.Token
+				accountID = handle.AccountID
 			}
+			accountID = handle.AccountID
 			refreshed = true
 			stats.retries.Add(1)
 			continue

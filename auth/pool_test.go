@@ -62,6 +62,21 @@ func TestPoolSkipsFailedAccounts(t *testing.T) {
 	}
 }
 
+func TestPoolAcquireIncludesAccountID(t *testing.T) {
+	pool := &TokenPool{strategy: "round-robin"}
+	tm := newTestManager("a", "token-a")
+	tm.authFile.Tokens.AccountID = "acct_123"
+	pool.managers = []*TokenManager{tm}
+
+	h, err := pool.Acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if h.AccountID != "acct_123" {
+		t.Errorf("AccountID = %q, want acct_123", h.AccountID)
+	}
+}
+
 func TestPoolIsHealthy(t *testing.T) {
 	pool := &TokenPool{strategy: "round-robin"}
 	pool.managers = []*TokenManager{
