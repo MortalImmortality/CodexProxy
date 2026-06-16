@@ -377,7 +377,7 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	imageModel := req.Model
 	if imageModel == "" {
-		imageModel = "gpt-image-1"
+		imageModel = "gpt-image-2"
 	}
 	if req.N == 0 {
 		req.N = 1
