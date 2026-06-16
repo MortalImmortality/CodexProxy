@@ -37,7 +37,7 @@ func curlPostForm(endpoint string, data url.Values) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("curl not found: %w", err)
 	}
 	cmd := exec.Command(curlPath,
-		"-s", "-w", "\n%{http_code}",
+		"-sL", "-w", "\n%{http_code}",
 		"-X", "POST",
 		"-H", "Content-Type: application/x-www-form-urlencoded",
 		"-H", "Accept: application/json",
