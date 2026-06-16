@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -63,8 +65,13 @@ func generateKey() string {
 }
 
 func (ks *KeyStore) ValidKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	keyHash := sha256.Sum256([]byte(key))
 	for _, k := range ks.Keys {
-		if k.Key == key {
+		storedHash := sha256.Sum256([]byte(k.Key))
+		if subtle.ConstantTimeCompare(keyHash[:], storedHash[:]) == 1 {
 			return true
 		}
 	}
@@ -173,7 +180,7 @@ func cmdKeyList() {
 	}
 
 	if len(ks.Keys) == 0 {
-		fmt.Println("  No API keys configured (proxy accepts all requests)")
+		fmt.Println("  No API keys configured (proxy rejects authenticated endpoints)")
 		return
 	}
 

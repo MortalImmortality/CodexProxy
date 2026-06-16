@@ -70,7 +70,11 @@ func main() {
 		auth.Pool.StartBackgroundRefresh(ctx)
 		defer auth.Pool.Stop()
 
-		ks, _ := loadKeys()
+		ks, err := loadKeys()
+		if err != nil {
+			slog.Error("failed to load API keys", "error", err)
+			os.Exit(1)
+		}
 		if envKey := os.Getenv("CODEX_PROXY_API_KEY"); envKey != "" {
 			ks.Keys = append(ks.Keys, APIKey{Key: envKey, Name: "env"})
 		}
