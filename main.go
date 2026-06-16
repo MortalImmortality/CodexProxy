@@ -75,8 +75,7 @@ func main() {
 			ks.Keys = append(ks.Keys, APIKey{Key: envKey, Name: "env"})
 		}
 		if len(ks.Keys) == 0 {
-			fmt.Fprintln(os.Stderr, "No API keys configured. Run 'codex-proxy key add' first.")
-			os.Exit(1)
+			slog.Warn("no API keys configured — all requests will be rejected until keys are added via 'codex-proxy key add'")
 		}
 		validateKey := proxy.KeyValidator(ks.ValidKey)
 
