@@ -157,7 +157,8 @@ func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
-  codex-proxy login [--device-auth] [--auth-file PATH]  Login via Codex OAuth
+  codex-proxy login [--auth-file PATH]                   Login via browser (paste callback URL)
+  codex-proxy login --device-auth [--auth-file PATH]     Login via device code (headless)
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy logout                                     Remove stored credentials

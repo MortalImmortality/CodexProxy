@@ -1,7 +1,11 @@
 package auth
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -342,9 +346,108 @@ func pollDeviceToken(deviceCode string) (*TokenResponse, error) {
 }
 
 func loginBrowser() error {
-	fmt.Println("Browser-based login: run 'codex login' or use --device-auth for headless")
-	fmt.Println("If you already have ~/.codex/auth.json, just run 'codex-proxy serve'")
+	verifier := generateCodeVerifier()
+	challenge := generateCodeChallenge(verifier)
+	state := generateState()
+	redirectURI := "http://localhost"
+
+	params := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {OAuthClientID},
+		"redirect_uri":          {redirectURI},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"openid profile email offline_access"},
+		"state":                 {state},
+	}
+	authorizeURL := OAuthAuthorizeURL + "?" + params.Encode()
+
+	fmt.Println()
+	fmt.Println("  Open this link in your browser to log in:")
+	fmt.Println()
+	fmt.Println("  " + authorizeURL)
+	fmt.Println()
+	fmt.Println("  After authorization, browser will redirect to a localhost URL (page won't load — that's OK).")
+	fmt.Println("  Copy the full URL from the address bar and paste it here:")
+	fmt.Print("\n> ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 4096), 4096)
+	if !scanner.Scan() {
+		return fmt.Errorf("no input received")
+	}
+	callbackURL := strings.TrimSpace(scanner.Text())
+
+	parsed, err := url.Parse(callbackURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	code := parsed.Query().Get("code")
+	if code == "" {
+		return fmt.Errorf("no authorization code found in URL")
+	}
+	if parsed.Query().Get("state") != state {
+		return fmt.Errorf("state mismatch")
+	}
+
+	fmt.Println("  Exchanging code for tokens...")
+
+	body, status, err := curlPostForm(OAuthTokenURL, url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"client_id":     {OAuthClientID},
+		"code_verifier": {verifier},
+	})
+	if err != nil {
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("token exchange returned %d: %s", status, body)
+	}
+
+	var tr TokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return fmt.Errorf("failed to parse token response: %w", err)
+	}
+
+	authFile := &AuthFile{
+		AuthMode: "browser",
+		Tokens: Tokens{
+			IDToken:      tr.IDToken,
+			AccessToken:  tr.AccessToken,
+			RefreshToken: tr.RefreshToken,
+		},
+		LastRefresh: time.Now(),
+	}
+	if err := saveAuthFile(authFile, Manager.filePath); err != nil {
+		return err
+	}
+	Manager.mu.Lock()
+	Manager.authFile = authFile
+	Manager.mu.Unlock()
+
+	fmt.Println("  ✓ Authenticated successfully!")
+	fmt.Printf("  Token saved to %s\n", Manager.filePath)
 	return nil
+}
+
+func generateCodeVerifier() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func generateCodeChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+func generateState() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // ──────────────────────────────────────────────
