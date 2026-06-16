@@ -588,12 +588,18 @@ func DiscoverModels(accessToken string) ([]string, error) {
 
 const UsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
-type UsageInfo struct {
-	PlanType    string `json:"plan_type"`
-	Allowed     bool   `json:"allowed"`
-	LimitHit    bool   `json:"limit_reached"`
+type UsageWindow struct {
+	Name        string `json:"name"`
 	UsedPercent int    `json:"used_percent"`
 	ResetSecs   int    `json:"reset_after_seconds"`
+}
+
+type UsageInfo struct {
+	PlanType string        `json:"plan_type"`
+	Allowed  bool          `json:"allowed"`
+	LimitHit bool          `json:"limit_reached"`
+	Windows  []UsageWindow `json:"windows"`
+	RawJSON  string        `json:"-"`
 }
 
 func QueryUsage(accessToken string) (*UsageInfo, error) {
@@ -613,27 +619,59 @@ func QueryUsage(accessToken string) (*UsageInfo, error) {
 	}
 
 	var raw struct {
-		PlanType string `json:"plan_type"`
+		PlanType  string `json:"plan_type"`
 		RateLimit *struct {
 			Allowed      bool `json:"allowed"`
 			LimitReached bool `json:"limit_reached"`
-			PrimaryWindow *struct {
-				UsedPercent     int `json:"used_percent"`
-				ResetAfterSecs  int `json:"reset_after_seconds"`
-			} `json:"primary_window"`
+			Windows      map[string]*struct {
+				UsedPercent    int `json:"used_percent"`
+				ResetAfterSecs int `json:"reset_after_seconds"`
+			} `json:"-"`
 		} `json:"rate_limit"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("cannot parse usage: %w", err)
 	}
 
-	info := &UsageInfo{PlanType: raw.PlanType}
+	info := &UsageInfo{PlanType: raw.PlanType, RawJSON: string(body)}
 	if raw.RateLimit != nil {
 		info.Allowed = raw.RateLimit.Allowed
 		info.LimitHit = raw.RateLimit.LimitReached
-		if raw.RateLimit.PrimaryWindow != nil {
-			info.UsedPercent = raw.RateLimit.PrimaryWindow.UsedPercent
-			info.ResetSecs = raw.RateLimit.PrimaryWindow.ResetAfterSecs
+
+		var rlMap map[string]json.RawMessage
+		if err := json.Unmarshal(body, &struct {
+			RateLimit *json.RawMessage `json:"rate_limit"`
+		}{}); err == nil {
+		}
+
+		var top map[string]json.RawMessage
+		json.Unmarshal(body, &top)
+		if rlRaw, ok := top["rate_limit"]; ok {
+			json.Unmarshal(rlRaw, &rlMap)
+		}
+
+		windowNames := []struct{ key, label string }{
+			{"primary_window", "session"},
+			{"secondary_window", "weekly"},
+			{"session_window", "session"},
+			{"weekly_window", "weekly"},
+		}
+		seen := map[string]bool{}
+		for _, wn := range windowNames {
+			if wRaw, ok := rlMap[wn.key]; ok && !seen[wn.label] {
+				var w struct {
+					UsedPercent    int `json:"used_percent"`
+					ResetAfterSecs int `json:"reset_after_seconds"`
+				}
+				if json.Unmarshal(wRaw, &w) == nil {
+					info.Windows = append(info.Windows, UsageWindow{
+						Name:        wn.label,
+						UsedPercent: w.UsedPercent,
+						ResetSecs:   w.ResetAfterSecs,
+					})
+					seen[wn.label] = true
+				}
+			}
 		}
 	}
 	return info, nil

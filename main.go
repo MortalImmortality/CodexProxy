@@ -176,6 +176,13 @@ func initPool(configPath string, host, port *string) {
 }
 
 func cmdUsage() {
+	raw := false
+	for _, a := range os.Args[2:] {
+		if a == "--raw" {
+			raw = true
+		}
+	}
+
 	cfg, err := loadConfig(defaultConfigPath())
 	if err != nil {
 		token, err := auth.Manager.EnsureFreshToken()
@@ -187,6 +194,10 @@ func cmdUsage() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Usage query failed: %v\n", err)
 			os.Exit(1)
+		}
+		if raw {
+			fmt.Println(info.RawJSON)
+			return
 		}
 		printAccountUsage("default", info)
 		return
@@ -204,30 +215,51 @@ func cmdUsage() {
 			fmt.Printf("  [%s] usage query failed: %v\n\n", acc.Name, err)
 			continue
 		}
+		if raw {
+			fmt.Printf("  [%s]\n%s\n\n", acc.Name, info.RawJSON)
+			continue
+		}
 		printAccountUsage(acc.Name, info)
 	}
 }
 
 func printAccountUsage(name string, info *auth.UsageInfo) {
-	resetMin := info.ResetSecs / 60
 	status := "✓"
 	if info.LimitHit {
 		status = "✗ LIMIT HIT"
 	}
-	bar := ""
-	filled := info.UsedPercent / 5
-	for i := 0; i < 20; i++ {
-		if i < filled {
-			bar += "█"
-		} else {
-			bar += "░"
-		}
-	}
 	fmt.Printf("  [%s]\n", name)
 	fmt.Printf("    Plan:     %s\n", info.PlanType)
-	fmt.Printf("    Usage:    [%s] %d%%\n", bar, info.UsedPercent)
 	fmt.Printf("    Status:   %s\n", status)
-	fmt.Printf("    Reset in: %dm\n\n", resetMin)
+	if len(info.Windows) == 0 {
+		fmt.Printf("    (no rate limit windows)\n")
+	}
+	for _, w := range info.Windows {
+		bar := ""
+		filled := w.UsedPercent / 5
+		for i := 0; i < 20; i++ {
+			if i < filled {
+				bar += "█"
+			} else {
+				bar += "░"
+			}
+		}
+		resetStr := formatReset(w.ResetSecs)
+		fmt.Printf("    %-8s  [%s] %d%%  (reset: %s)\n", w.Name+":", bar, w.UsedPercent, resetStr)
+	}
+	fmt.Println()
+}
+
+func formatReset(secs int) string {
+	if secs <= 0 {
+		return "-"
+	}
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 func printUsage() {

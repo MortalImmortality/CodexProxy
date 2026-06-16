@@ -787,14 +787,14 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 			})
 			continue
 		}
-		results = append(results, map[string]interface{}{
-			"account":             tm.Name(),
-			"plan_type":           info.PlanType,
-			"used_percent":        info.UsedPercent,
-			"allowed":             info.Allowed,
-			"limit_reached":       info.LimitHit,
-			"reset_after_seconds": info.ResetSecs,
-		})
+		entry := map[string]interface{}{
+			"account":       tm.Name(),
+			"plan_type":     info.PlanType,
+			"allowed":       info.Allowed,
+			"limit_reached": info.LimitHit,
+			"windows":       info.Windows,
+		}
+		results = append(results, entry)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
