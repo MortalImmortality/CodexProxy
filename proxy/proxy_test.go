@@ -335,6 +335,21 @@ func TestHandleImageRejectsOversizedMultipart(t *testing.T) {
 	}
 }
 
+func TestHandleImageRejectsTooManyImages(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{
+		"prompt": "draw a square",
+		"n": 11
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handleImage(w, req, "gpt-5.4-mini", false)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestCORSAllowsXAPIKey(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

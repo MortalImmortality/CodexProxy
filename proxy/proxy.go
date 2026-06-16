@@ -763,6 +763,11 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	if req.N == 0 {
 		req.N = 1
 	}
+	if req.N < 0 || req.N > 10 {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "n must be between 1 and 10")
+		return
+	}
 
 	imageTool := map[string]interface{}{
 		"type":  "image_generation",
@@ -811,37 +816,35 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		},
 	}
 
-	codexBody, _ := json.Marshal(codexReq)
-
-	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
-	if err != nil {
-		stats.errorsTotal.Add(1)
-		writeError(w, 502, "upstream_error", err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		stats.errorsTotal.Add(1)
-		respBody, _ := io.ReadAll(resp.Body)
-		slog.Error("upstream image error",
-			"status", resp.StatusCode,
-			"body", string(respBody[:min(500, len(respBody))]))
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
-		return
-	}
-
-	images, err := parseImageSSE(resp.Body)
-	if err != nil {
-		stats.errorsTotal.Add(1)
-		writeError(w, 502, "upstream_error", err.Error())
-		return
+	var images []imageResult
+	for len(images) < req.N {
+		batch, status, respBody, err := generateImagesOnce(r.Context(), codexReq)
+		if err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 502, "upstream_error", err.Error())
+			return
+		}
+		if status != 200 {
+			stats.errorsTotal.Add(1)
+			slog.Error("upstream image error",
+				"status", status,
+				"body", string(respBody[:min(500, len(respBody))]))
+			w.WriteHeader(status)
+			w.Write(respBody)
+			return
+		}
+		if len(batch) == 0 {
+			break
+		}
+		images = append(images, batch...)
 	}
 	if len(images) == 0 {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", "no image generated")
 		return
+	}
+	if len(images) > req.N {
+		images = images[:req.N]
 	}
 
 	data := make([]map[string]interface{}, 0, len(images))
@@ -862,6 +865,26 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		"created": time.Now().Unix(),
 		"data":    data,
 	})
+}
+
+func generateImagesOnce(ctx context.Context, codexReq map[string]interface{}) ([]imageResult, int, []byte, error) {
+	codexBody, _ := json.Marshal(codexReq)
+	resp, err := callUpstream(ctx, upstreamBase+"/responses", codexBody, true)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, resp.StatusCode, respBody, nil
+	}
+
+	images, err := parseImageSSE(resp.Body)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return images, resp.StatusCode, nil, nil
 }
 
 type imageResult struct {
