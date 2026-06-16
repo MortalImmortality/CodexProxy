@@ -126,7 +126,7 @@ const resp = await client.chat.completions.create({
 ```bash
 ./codex-proxy status
 
-#   Auth mode:       chatgptDeviceCode
+#   Auth mode:       browser
 #   Last refresh:    2026-06-15T10:30:00+08:00
 #   Token staleness: 2h30m
 #   Access token:    eyJhbGciO...abc123
@@ -163,7 +163,7 @@ const resp = await client.chat.completions.create({
 
 ```json
 {
-  "auth_mode": "chatgptDeviceCode",
+  "auth_mode": "browser",
   "tokens": {
     "id_token": "eyJ...",
     "access_token": "eyJ...",
