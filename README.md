@@ -132,7 +132,7 @@ const resp = await client.chat.completions.create({
 
 ## API Key 管理
 
-POST 请求（chat completions、responses）需要 API key 认证。GET 请求（models、health、usage 等）无需认证。
+除 `OPTIONS`、`/health` 和 `/` 外，所有接口都需要 API key 认证，包括 `/v1/models`、`/metrics` 和 `/usage`。
 
 ```bash
 codex-proxy key add [--name NAME] [--key KEY]    # 添加 key（不指定则自动生成）
@@ -200,10 +200,10 @@ resp = client.images.edit(
 | `/v1/images/generations` | POST | 需要 | 文生图（OpenAI images API 兼容） |
 | `/v1/images/edits` | POST | 需要 | 图生图（multipart 或 JSON data URL） |
 | `/v1/responses` | POST | 需要 | Codex Responses API 直通 |
-| `/v1/models` | GET | 不需要 | 列出可用模型（含 `gpt-image-2`） |
+| `/v1/models` | GET | 需要 | 列出可用模型（含 `gpt-image-2`） |
 | `/health` | GET | 不需要 | 健康检查（含 Token 状态） |
-| `/metrics` | GET | 不需要 | 运行指标（请求数、错误数、重试次数、uptime） |
-| `/usage` | GET | 不需要 | 各账号 rate limit 用量 |
+| `/metrics` | GET | 需要 | 运行指标（请求数、错误数、重试次数、uptime） |
+| `/usage` | GET | 需要 | 各账号 rate limit 用量 |
 
 ## CLI 命令
 

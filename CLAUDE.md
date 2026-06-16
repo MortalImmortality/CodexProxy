@@ -22,13 +22,13 @@ codex-proxy start       # start background service
 codex-proxy stop / restart / logs / uninstall
 ```
 
-No external dependencies — stdlib only (Go 1.22+, uses log/slog and builtin min). No tests exist yet.
+No external dependencies — stdlib only (Go 1.22+, uses log/slog and builtin min). Tests live under `auth/*_test.go` and `proxy/*_test.go`; run `go test ./...` before committing.
 
 ## What This Is
 
 Local HTTP proxy that lets any OpenAI-compatible SDK hit ChatGPT's Codex backend API using the user's ChatGPT subscription (no API credits). The flow:
 
-1. User authenticates via OpenAI Device Code OAuth
+1. User authenticates via browser OAuth with PKCE
 2. Proxy holds/refreshes tokens and listens on `:10531`
 3. Incoming `/v1/chat/completions` requests get translated to Codex `/responses` format and forwarded to `chatgpt.com/backend-api/codex/responses`
 4. Responses get converted back to OpenAI chat completion shape (both streaming SSE and non-streaming)
@@ -48,7 +48,7 @@ codex-proxy.plist        macOS launchd service definition
 
 - **`auth/auth.go`** — Browser-based OAuth with PKCE, token persistence (`~/.codex-proxy/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. Auth requests use `curl` subprocess to avoid Cloudflare TLS fingerprint blocking on VPS.
 
-- **`proxy/proxy.go`** — HTTP server with OpenAI-compatible endpoints. Two HTTP clients: `normalClient` (60s timeout) and `streamClient` (no overall timeout, 30s response header timeout). `callUpstream` handles 401→refresh-and-retry plus 429/5xx→exponential backoff (max 2 retries). Streaming `/v1/chat/completions` converts Codex SSE events (`response.output_text.delta`, `response.completed`) into OpenAI chat completion chunk format. `/v1/responses` does raw SSE passthrough. Request bodies capped at 10MB via `http.MaxBytesReader`.
+- **`proxy/proxy.go`** — HTTP server with OpenAI-compatible endpoints. Two HTTP clients: `normalClient` (60s timeout) and `streamClient` (no overall timeout, 30s response header timeout). `callUpstream` handles 401→refresh-and-retry plus 429/5xx→exponential backoff (max 2 retries). Streaming `/v1/chat/completions` converts Codex SSE events (`response.output_text.delta`, `response.completed`) into OpenAI chat completion chunk format. `/v1/responses` does raw SSE passthrough. JSON and multipart request bodies are capped at 10MB via `http.MaxBytesReader`.
 
 ### Endpoints
 
@@ -64,8 +64,8 @@ codex-proxy.plist        macOS launchd service definition
 
 - `auth.Manager` is a package-level singleton (`*TokenManager`) initialized in `init()`. All token access goes through it.
 - Token file path: `$CODEX_HOME/auth.json` or `~/.codex-proxy/auth.json`. Written with 0600 perms.
-- `BuildCodexRequestBody` maps `messages` → `input` and passes through `temperature`, `top_p`, `max_tokens`, `max_output_tokens`, `stop`, `tools`, `tool_choice`, `response_format`.
-- `convertToOpenAIFormat` / `extractContent` navigate the Codex response structure (`output[].content[].text`) back into `choices[].message.content`.
+- `BuildCodexRequestBody` maps `messages` → `input`, drops Codex-rejected chat params (`max_tokens`, `max_output_tokens`, `stop`), drops sampling params for reasoning models, flattens Chat Completions function tools, and maps `response_format` to `text.format`.
+- `convertToOpenAIFormat` / `extractMessage` navigate the Codex response structure (`output[].content[].text`, function calls, image calls, refusals) back into `choices[].message`.
 - `logWriter` wraps `http.ResponseWriter` and implements `http.Flusher` so streaming works through the logging middleware.
 - Structured JSON logging (slog) only in `serve` mode; interactive commands use plain fmt.
 
