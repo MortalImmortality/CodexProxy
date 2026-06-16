@@ -81,6 +81,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
+	mux.HandleFunc("/v1/images/generations", handleImageGenerations)
 	mux.HandleFunc("/usage", handleUsage)
 	mux.HandleFunc("/v1/responses", handleResponses)
 	mux.HandleFunc("/v1/models", makeModelsHandler(models))
@@ -124,6 +125,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 			"openai_compatible": true,
 			"endpoints": []string{
 				"/v1/chat/completions",
+				"/v1/images/generations",
 				"/v1/responses",
 				"/v1/models",
 				"/health",
@@ -332,6 +334,204 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // ──────────────────────────────────────────────
+// /v1/images/generations → Codex image_generation tool
+// ──────────────────────────────────────────────
+
+func handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "POST only")
+		return
+	}
+
+	stats.requestsTotal.Add(1)
+	stats.requestsActive.Add(1)
+	defer stats.requestsActive.Add(-1)
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "cannot read request body")
+		return
+	}
+
+	var req struct {
+		Prompt           string `json:"prompt"`
+		Model            string `json:"model"`
+		N                int    `json:"n"`
+		Size             string `json:"size"`
+		Quality          string `json:"quality"`
+		ResponseFormat   string `json:"response_format"`
+		Background       string `json:"background"`
+		OutputFormat     string `json:"output_format"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "invalid JSON")
+		return
+	}
+
+	if req.Prompt == "" {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "prompt is required")
+		return
+	}
+	if req.Model == "" {
+		req.Model = "gpt-image-1"
+	}
+	if req.N == 0 {
+		req.N = 1
+	}
+
+	imageTool := map[string]interface{}{
+		"type": "image_generation",
+	}
+	if req.Size != "" {
+		imageTool["size"] = req.Size
+	}
+	if req.Quality != "" {
+		imageTool["quality"] = req.Quality
+	}
+	if req.Background != "" {
+		imageTool["background"] = req.Background
+	}
+	outputFormat := req.OutputFormat
+	if outputFormat == "" {
+		outputFormat = "png"
+	}
+	imageTool["output_format"] = outputFormat
+
+	codexReq := map[string]interface{}{
+		"model":       req.Model,
+		"stream":      true,
+		"store":       false,
+		"tool_choice": "image_generation",
+		"tools":       []interface{}{imageTool},
+		"input": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type": "input_text",
+						"text": req.Prompt,
+					},
+				},
+			},
+		},
+	}
+
+	codexBody, _ := json.Marshal(codexReq)
+
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		stats.errorsTotal.Add(1)
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("upstream image error",
+			"status", resp.StatusCode,
+			"body", string(respBody[:min(500, len(respBody))]))
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	images := parseImageSSE(resp.Body)
+	if len(images) == 0 {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", "no image generated")
+		return
+	}
+
+	data := make([]map[string]interface{}, 0, len(images))
+	for _, img := range images {
+		item := map[string]interface{}{
+			"revised_prompt": img.revisedPrompt,
+		}
+		if req.ResponseFormat == "url" {
+			item["url"] = "data:image/" + outputFormat + ";base64," + img.b64JSON
+		} else {
+			item["b64_json"] = img.b64JSON
+		}
+		data = append(data, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"created": time.Now().Unix(),
+		"data":    data,
+	})
+}
+
+type imageResult struct {
+	b64JSON       string
+	revisedPrompt string
+}
+
+func parseImageSSE(body io.Reader) []imageResult {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
+
+	var results []imageResult
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var ev struct {
+			Type     string `json:"type"`
+			Item     *struct {
+				Type          string `json:"type"`
+				Result        string `json:"result"`
+				RevisedPrompt string `json:"revised_prompt"`
+			} `json:"item"`
+			Response *struct {
+				Output []struct {
+					Type          string `json:"type"`
+					Result        string `json:"result"`
+					RevisedPrompt string `json:"revised_prompt"`
+				} `json:"output"`
+			} `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &ev) != nil {
+			continue
+		}
+
+		switch ev.Type {
+		case "response.output_item.done":
+			if ev.Item != nil && ev.Item.Type == "image_generation_call" && ev.Item.Result != "" {
+				results = append(results, imageResult{
+					b64JSON:       ev.Item.Result,
+					revisedPrompt: ev.Item.RevisedPrompt,
+				})
+			}
+		case "response.completed", "response.done":
+			if ev.Response != nil && len(results) == 0 {
+				for _, out := range ev.Response.Output {
+					if out.Type == "image_generation_call" && out.Result != "" {
+						results = append(results, imageResult{
+							b64JSON:       out.Result,
+							revisedPrompt: out.RevisedPrompt,
+						})
+					}
+				}
+			}
+		}
+	}
+	return results
+}
+
+// ──────────────────────────────────────────────
 // /v1/responses → pass-through to Codex
 // ──────────────────────────────────────────────
 
@@ -428,7 +628,7 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 	w.WriteHeader(200)
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
 	created := time.Now().Unix()
 	respID := fmt.Sprintf("chatcmpl-%d", created)
@@ -490,6 +690,30 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 				return
 			}
 			flusher.Flush()
+
+		case "response.output_item.done":
+			var ev struct {
+				Item struct {
+					Type          string `json:"type"`
+					Result        string `json:"result"`
+					RevisedPrompt string `json:"revised_prompt"`
+					OutputFormat  string `json:"output_format"`
+				} `json:"item"`
+			}
+			if json.Unmarshal([]byte(data), &ev) == nil && ev.Item.Type == "image_generation_call" && ev.Item.Result != "" {
+				outFmt := ev.Item.OutputFormat
+				if outFmt == "" {
+					outFmt = "png"
+				}
+				dataURL := "data:image/" + outFmt + ";base64," + ev.Item.Result
+				content := "![image](" + dataURL + ")"
+				chunk := buildStreamChunk(respID, model, created, firstContent, content, "")
+				firstContent = false
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", chunk); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
 
 		case "response.function_call_arguments.delta":
 			var ev struct {
@@ -735,8 +959,6 @@ func extractMessage(resp map[string]interface{}) (map[string]interface{}, string
 			}
 
 		case "function_call":
-			// Codex: {"type":"function_call","call_id":"x","name":"f","arguments":"..."}
-			// Chat:  {"id":"x","type":"function","function":{"name":"f","arguments":"..."}}
 			callID, _ := itemMap["call_id"].(string)
 			name, _ := itemMap["name"].(string)
 			args, _ := itemMap["arguments"].(string)
@@ -748,6 +970,19 @@ func extractMessage(resp map[string]interface{}) (map[string]interface{}, string
 					"arguments": args,
 				},
 			})
+
+		case "image_generation_call":
+			b64, _ := itemMap["result"].(string)
+			if b64 != "" {
+				revisedPrompt, _ := itemMap["revised_prompt"].(string)
+				outputFmt, _ := itemMap["output_format"].(string)
+				if outputFmt == "" {
+					outputFmt = "png"
+				}
+				dataURL := "data:image/" + outputFmt + ";base64," + b64
+				textParts = append(textParts, "![image]("+dataURL+")")
+				_ = revisedPrompt
+			}
 		}
 	}
 
