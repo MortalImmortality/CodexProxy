@@ -372,7 +372,12 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if clientWantsStream {
 		streamChatCompletion(w, resp, model, includeUsage)
 	} else {
-		respObj := aggregateCodexResponse(resp.Body)
+		respObj, err := aggregateCodexResponse(resp.Body)
+		if err != nil {
+			stats.errorsTotal.Add(1)
+			writeError(w, 502, "upstream_error", err.Error())
+			return
+		}
 		if respObj == nil {
 			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", "no response from upstream")
@@ -389,7 +394,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // non-streaming client gets a single chat.completion. Falls back to a
 // synthesized response built from output_text deltas if no completed event
 // carries a response object.
-func aggregateCodexResponse(body io.Reader) []byte {
+func aggregateCodexResponse(body io.Reader) ([]byte, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 
@@ -439,17 +444,20 @@ func aggregateCodexResponse(body io.Reader) []byte {
 	if completedResponse != nil {
 		if textBuf.Len() > 0 {
 			if patched := injectOutputTextIfMissing(completedResponse, textBuf.String()); patched != nil {
-				return patched
+				return patched, nil
 			}
 		}
-		return completedResponse
+		return completedResponse, nil
 	}
 
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("upstream stream read failed: %w", err)
+	}
 	if textBuf.Len() == 0 {
-		return nil
+		return nil, nil
 	}
 	// Fallback: no response object seen, wrap accumulated text.
-	return synthesizeTextResponse(textBuf.String())
+	return synthesizeTextResponse(textBuf.String()), nil
 }
 
 func injectOutputTextIfMissing(respBody []byte, text string) []byte {
@@ -741,7 +749,12 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		return
 	}
 
-	images := parseImageSSE(resp.Body)
+	images, err := parseImageSSE(resp.Body)
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", err.Error())
+		return
+	}
 	if len(images) == 0 {
 		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", "no image generated")
@@ -773,7 +786,7 @@ type imageResult struct {
 	revisedPrompt string
 }
 
-func parseImageSSE(body io.Reader) []imageResult {
+func parseImageSSE(body io.Reader) ([]imageResult, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
 
@@ -843,7 +856,10 @@ func parseImageSSE(body io.Reader) []imageResult {
 		}
 		eventType = ""
 	}
-	return results
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("upstream image stream read failed: %w", err)
+	}
+	return results, nil
 }
 
 // ──────────────────────────────────────────────
@@ -1090,6 +1106,9 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 		eventType = ""
 	}
 
+	if err := scanner.Err(); err != nil {
+		slog.Error("stream read error", "error", err)
+	}
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }

@@ -135,7 +135,10 @@ func TestAggregateCodexResponseUsesDeltasWhenCompletedHasNoOutput(t *testing.T) 
 		``,
 	}, "\n")
 
-	respBody := aggregateCodexResponse(strings.NewReader(sse))
+	respBody, err := aggregateCodexResponse(strings.NewReader(sse))
+	if err != nil {
+		t.Fatalf("aggregateCodexResponse: %v", err)
+	}
 	chatReq := map[string]interface{}{"model": "gpt-5.4-mini"}
 	result := convertToOpenAIFormat(respBody, chatReq)
 
@@ -151,6 +154,17 @@ func TestAggregateCodexResponseUsesDeltasWhenCompletedHasNoOutput(t *testing.T) 
 	usage := openaiResp["usage"].(map[string]interface{})
 	if usage["total_tokens"] != float64(4) {
 		t.Errorf("total_tokens = %v, want 4", usage["total_tokens"])
+	}
+}
+
+func TestAggregateCodexResponseReturnsScannerError(t *testing.T) {
+	oversizedLine := "data: " + strings.Repeat("x", 10*1024*1024+1)
+	respBody, err := aggregateCodexResponse(strings.NewReader(oversizedLine))
+	if err == nil {
+		t.Fatal("expected scanner error for oversized SSE line")
+	}
+	if respBody != nil {
+		t.Fatalf("response body = %s, want nil", respBody)
 	}
 }
 
