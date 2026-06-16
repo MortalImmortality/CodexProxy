@@ -413,11 +413,12 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel st
 	imageTool["output_format"] = outputFormat
 
 	codexReq := map[string]interface{}{
-		"model":       baseModel,
-		"stream":      true,
-		"store":       false,
-		"tool_choice": "image_generation",
-		"tools":       []interface{}{imageTool},
+		"model":        baseModel,
+		"stream":       true,
+		"store":        false,
+		"instructions": "Generate the image as requested.",
+		"tool_choice":  "image_generation",
+		"tools":        []interface{}{imageTool},
 		"input": []interface{}{
 			map[string]interface{}{
 				"role": "user",
