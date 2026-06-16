@@ -596,6 +596,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		// OpenAI SDK sends images.edits as multipart with image file(s).
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := r.ParseMultipartForm(maxRequestBodySize); err != nil {
 			stats.errorsTotal.Add(1)
 			writeError(w, 400, "bad_request", "cannot parse multipart form")

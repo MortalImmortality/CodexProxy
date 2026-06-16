@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -193,5 +197,33 @@ func TestBuildStreamChunk(t *testing.T) {
 	fr := choices3[0].(map[string]interface{})["finish_reason"]
 	if fr != "stop" {
 		t.Errorf("finish_reason = %v, want stop", fr)
+	}
+}
+
+func TestHandleImageRejectsOversizedMultipart(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("prompt", "edit this image"); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	part, err := writer.CreateFormFile("image", "large.png")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(bytes.Repeat([]byte("x"), maxRequestBodySize+1)); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	handleImage(w, req, "gpt-5.4-mini", true)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
