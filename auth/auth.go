@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	OAuthAuthorizeURL = "https://auth.openai.com/authorize"
+	OAuthAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	OAuthTokenURL     = "https://auth.openai.com/oauth/token"
 
 	OAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -235,7 +235,7 @@ func loginBrowser() error {
 	verifier := generateCodeVerifier()
 	challenge := generateCodeChallenge(verifier)
 	state := generateState()
-	redirectURI := "https://auth.openai.com/deviceauth/callback"
+	redirectURI := "http://localhost:1455/auth/callback"
 
 	params := url.Values{
 		"response_type":              {"code"},
@@ -255,7 +255,8 @@ func loginBrowser() error {
 	fmt.Println()
 	fmt.Println("  " + authorizeURL)
 	fmt.Println()
-	fmt.Println("  After authorization, copy the full URL from the address bar and paste it here:")
+	fmt.Println("  After authorization, browser redirects to localhost (page won't load — that's OK).")
+	fmt.Println("  Copy the full URL from the address bar and paste it here:")
 	fmt.Print("\n> ")
 
 	scanner := bufio.NewScanner(os.Stdin)
