@@ -417,7 +417,7 @@ func handleImageGenerations(w http.ResponseWriter, r *http.Request, baseModel st
 		"stream":       true,
 		"store":        false,
 		"instructions": "Generate the image as requested.",
-		"tool_choice":  "image_generation",
+		"tool_choice":  "auto",
 		"tools":        []interface{}{imageTool},
 		"input": []interface{}{
 			map[string]interface{}{
