@@ -70,14 +70,15 @@ func main() {
 		auth.Pool.StartBackgroundRefresh(ctx)
 		defer auth.Pool.Stop()
 
-		var validateKey proxy.KeyValidator
 		ks, _ := loadKeys()
 		if envKey := os.Getenv("CODEX_PROXY_API_KEY"); envKey != "" {
 			ks.Keys = append(ks.Keys, APIKey{Key: envKey, Name: "env"})
 		}
-		if len(ks.Keys) > 0 {
-			validateKey = ks.ValidKey
+		if len(ks.Keys) == 0 {
+			fmt.Fprintln(os.Stderr, "No API keys configured. Run 'codex-proxy key add' first.")
+			os.Exit(1)
 		}
+		validateKey := proxy.KeyValidator(ks.ValidKey)
 
 		if err := proxy.Serve(ctx, host, port, validateKey); err != nil {
 			slog.Error("proxy server stopped", "error", err)

@@ -139,19 +139,11 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	fmt.Printf("  │  Models:   %-30s       │\n", strings.Join(models[:min(3, len(models))], ", "))
 	fmt.Printf("  ╰──────────────────────────────────────────────────╯\n")
 	fmt.Println()
-	if validateKey != nil {
-		fmt.Printf("  Auth:     API key required\n")
-	} else {
-		fmt.Printf("  Auth:     none (run 'codex-proxy key add' to enable)\n")
-	}
+	fmt.Printf("  Auth:     API key required\n")
 	fmt.Println()
 	fmt.Println("  Use with any OpenAI SDK:")
 	fmt.Printf("    export OPENAI_BASE_URL=http://%s/v1\n", addr)
-	if validateKey != nil {
-		fmt.Println("    export OPENAI_API_KEY=<your-api-key>")
-	} else {
-		fmt.Println("    export OPENAI_API_KEY=unused")
-	}
+	fmt.Println("    export OPENAI_API_KEY=<your-api-key>")
 	fmt.Println()
 
 	server := &http.Server{
@@ -774,9 +766,6 @@ func extractMessage(resp map[string]interface{}) (map[string]interface{}, string
 // ──────────────────────────────────────────────
 
 func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
-	if validateKey == nil {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" ||
 			r.URL.Path == "/health" ||
