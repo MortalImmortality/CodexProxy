@@ -70,8 +70,16 @@ func main() {
 		auth.Pool.StartBackgroundRefresh(ctx)
 		defer auth.Pool.Stop()
 
-		apiKey := os.Getenv("CODEX_PROXY_API_KEY")
-		if err := proxy.Serve(ctx, host, port, apiKey); err != nil {
+		var validateKey proxy.KeyValidator
+		ks, _ := loadKeys()
+		if envKey := os.Getenv("CODEX_PROXY_API_KEY"); envKey != "" {
+			ks.Keys = append(ks.Keys, APIKey{Key: envKey, Name: "env"})
+		}
+		if len(ks.Keys) > 0 {
+			validateKey = ks.ValidKey
+		}
+
+		if err := proxy.Serve(ctx, host, port, validateKey); err != nil {
 			slog.Error("proxy server stopped", "error", err)
 			os.Exit(1)
 		}
@@ -91,6 +99,23 @@ func main() {
 		if runtime.GOOS == "linux" {
 			fmt.Println()
 			printServiceStatus()
+		}
+
+	case "key":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: codex-proxy key <add|delete|list>")
+			os.Exit(1)
+		}
+		switch os.Args[2] {
+		case "add":
+			cmdKeyAdd(os.Args[3:])
+		case "delete", "del", "rm":
+			cmdKeyDelete(os.Args[3:])
+		case "list", "ls":
+			cmdKeyList()
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown key command: %s\n", os.Args[2])
+			os.Exit(1)
 		}
 
 	case "logout":
@@ -155,6 +180,11 @@ Usage:
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy logout                                     Remove stored credentials
+
+API key management:
+  codex-proxy key add [--name NAME] [--key KEY]          Add API key (auto-generate if no --key)
+  codex-proxy key list                                   List all API keys
+  codex-proxy key delete <key-or-name>                   Delete an API key
 
 Service management (Linux):
   codex-proxy install                  Install systemd user service

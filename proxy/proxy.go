@@ -64,7 +64,9 @@ var stats struct {
 // Serve starts the OpenAI-compatible API proxy
 // ──────────────────────────────────────────────
 
-func Serve(ctx context.Context, host, port, apiKey string) error {
+type KeyValidator func(string) bool
+
+func Serve(ctx context.Context, host, port string, validateKey KeyValidator) error {
 	handle, err := auth.Pool.Acquire()
 	if err != nil {
 		return fmt.Errorf("cannot start proxy: %w", err)
@@ -137,16 +139,16 @@ func Serve(ctx context.Context, host, port, apiKey string) error {
 	fmt.Printf("  │  Models:   %-30s       │\n", strings.Join(models[:min(3, len(models))], ", "))
 	fmt.Printf("  ╰──────────────────────────────────────────────────╯\n")
 	fmt.Println()
-	if apiKey != "" {
-		fmt.Printf("  Auth:     API key required (CODEX_PROXY_API_KEY)\n")
+	if validateKey != nil {
+		fmt.Printf("  Auth:     API key required\n")
 	} else {
-		fmt.Printf("  Auth:     none (set CODEX_PROXY_API_KEY to enable)\n")
+		fmt.Printf("  Auth:     none (run 'codex-proxy key add' to enable)\n")
 	}
 	fmt.Println()
 	fmt.Println("  Use with any OpenAI SDK:")
 	fmt.Printf("    export OPENAI_BASE_URL=http://%s/v1\n", addr)
-	if apiKey != "" {
-		fmt.Println("    export OPENAI_API_KEY=<your CODEX_PROXY_API_KEY>")
+	if validateKey != nil {
+		fmt.Println("    export OPENAI_API_KEY=<your-api-key>")
 	} else {
 		fmt.Println("    export OPENAI_API_KEY=unused")
 	}
@@ -154,7 +156,7 @@ func Serve(ctx context.Context, host, port, apiKey string) error {
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withLogging(withCORS(withAuth(apiKey, mux))),
+		Handler:      withLogging(withCORS(withAuth(validateKey, mux))),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  120 * time.Second,
@@ -771,8 +773,8 @@ func extractMessage(resp map[string]interface{}) (map[string]interface{}, string
 // Middleware
 // ──────────────────────────────────────────────
 
-func withAuth(apiKey string, next http.Handler) http.Handler {
-	if apiKey == "" {
+func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
+	if validateKey == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -792,7 +794,7 @@ func withAuth(apiKey string, next http.Handler) http.Handler {
 			key = r.Header.Get("X-API-Key")
 		}
 
-		if key != apiKey {
+		if !validateKey(key) {
 			writeError(w, 401, "unauthorized", "invalid or missing API key")
 			return
 		}
