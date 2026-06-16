@@ -235,16 +235,18 @@ func loginBrowser() error {
 	verifier := generateCodeVerifier()
 	challenge := generateCodeChallenge(verifier)
 	state := generateState()
-	redirectURI := "http://localhost"
+	redirectURI := "https://auth.openai.com/deviceauth/callback"
 
 	params := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {OAuthClientID},
-		"redirect_uri":          {redirectURI},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"scope":                 {"openid profile email offline_access"},
-		"state":                 {state},
+		"response_type":              {"code"},
+		"client_id":                  {OAuthClientID},
+		"redirect_uri":              {redirectURI},
+		"code_challenge":            {challenge},
+		"code_challenge_method":     {"S256"},
+		"scope":                     {"openid profile email offline_access"},
+		"state":                     {state},
+		"codex_cli_simplified_flow": {"true"},
+		"id_token_add_organizations": {"true"},
 	}
 	authorizeURL := OAuthAuthorizeURL + "?" + params.Encode()
 
@@ -253,8 +255,7 @@ func loginBrowser() error {
 	fmt.Println()
 	fmt.Println("  " + authorizeURL)
 	fmt.Println()
-	fmt.Println("  After authorization, browser will redirect to a localhost URL (page won't load — that's OK).")
-	fmt.Println("  Copy the full URL from the address bar and paste it here:")
+	fmt.Println("  After authorization, copy the full URL from the address bar and paste it here:")
 	fmt.Print("\n> ")
 
 	scanner := bufio.NewScanner(os.Stdin)
