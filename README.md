@@ -121,10 +121,10 @@ By default credentials are stored in:
 ~/.codex-proxy/auth.json
 ```
 
-You can write a different auth file for multi-account setups:
+For multi-account setups, log in again with a different local account name:
 
 ```bash
-codex-proxy login --auth-file ~/.codex-proxy/auth-alt.json
+codex-proxy login --name alt
 ```
 
 ### 2. Create an API key
@@ -365,6 +365,7 @@ CLI usage:
 
 ```bash
 codex-proxy usage
+codex-proxy usage --config /path/to/proxy.json
 ```
 
 HTTP usage:
@@ -396,22 +397,27 @@ Log in once per account:
 
 ```bash
 codex-proxy login
-codex-proxy login --auth-file ~/.codex-proxy/auth-alt.json
+codex-proxy login --name alt
+codex-proxy logout --name alt
 ```
 
-Create `~/.codex-proxy/proxy.json`:
+Successful logins are registered automatically in `~/.codex-proxy/proxy.json`:
 
 ```json
 {
   "accounts": [
-    {"name": "main", "auth_file": "~/.codex-proxy/auth.json"},
+    {"name": "default", "auth_file": "~/.codex-proxy/auth.json"},
     {"name": "alt", "auth_file": "~/.codex-proxy/auth-alt.json"}
   ],
-  "strategy": "round-robin",
-  "host": "127.0.0.1",
-  "port": "10531"
+  "strategy": "round-robin"
 }
 ```
+
+Auth files are always stored in the codex-proxy config directory. By default, `--name alt` writes `~/.codex-proxy/auth-alt.json`; without `--name`, it writes `~/.codex-proxy/auth.json`.
+
+When the service is already running, account additions/removals and `strategy` changes in `proxy.json` are reloaded automatically. Active requests keep using their current account; new requests use the updated load-balancing pool.
+
+You only need to edit the file manually for advanced settings such as `host`, `port`, or a custom strategy.
 
 Start with auto-discovery:
 
@@ -563,12 +569,12 @@ Keep API key authentication enabled even behind Caddy.
 ## CLI reference
 
 ```bash
-codex-proxy login [--auth-file PATH]
+codex-proxy login [--name NAME]
 codex-proxy serve [--host H] [--port P] [--config F]
 codex-proxy status
 codex-proxy usage
 codex-proxy doctor
-codex-proxy logout
+codex-proxy logout [--name NAME]
 
 codex-proxy key add [--name NAME] [--key KEY]
 codex-proxy key list

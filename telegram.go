@@ -392,10 +392,10 @@ func telegramUsageText() string {
 	lines = append(lines, "📊 <b>账号用量</b>")
 	for _, tm := range managers {
 		lines = append(lines, "")
-		token := tm.GetAccessToken()
-		if token == "" {
+		token, err := tm.EnsureFreshToken()
+		if err != nil {
 			lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(tm.Name())))
-			lines = append(lines, "• 状态：⚠️ no token")
+			lines = append(lines, fmt.Sprintf("• 状态：⚠️ %s", tgEscape(err.Error())))
 			continue
 		}
 		info, err := auth.QueryUsage(token)

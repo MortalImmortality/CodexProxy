@@ -77,6 +77,60 @@ func TestPoolAcquireIncludesAccountID(t *testing.T) {
 	}
 }
 
+func TestPoolUpdateAccountsPreservesAddsAndRemovesManagers(t *testing.T) {
+	pool := &TokenPool{strategy: "round-robin"}
+	a := newTestManager("a", "token-a")
+	pool.managers = []*TokenManager{a}
+
+	pool.UpdateAccounts([]AccountConfig{
+		{Name: "a", AuthFile: a.FilePath()},
+		{Name: "b", AuthFile: "/tmp/test-b.json"},
+	}, "random")
+
+	managers := pool.Managers()
+	if len(managers) != 2 {
+		t.Fatalf("managers = %d, want 2", len(managers))
+	}
+	if managers[0] != a {
+		t.Fatal("existing manager was not preserved")
+	}
+	if managers[1].Name() != "b" {
+		t.Fatalf("new manager = %s, want b", managers[1].Name())
+	}
+	if pool.Strategy() != "random" {
+		t.Fatalf("strategy = %q, want random", pool.Strategy())
+	}
+
+	pool.UpdateAccounts([]AccountConfig{{Name: "b", AuthFile: "/tmp/test-b.json"}}, "")
+
+	managers = pool.Managers()
+	if len(managers) != 1 || managers[0].Name() != "b" {
+		t.Fatalf("managers after delete = %#v, want only b", managers)
+	}
+	if pool.Strategy() != "round-robin" {
+		t.Fatalf("empty strategy = %q, want round-robin", pool.Strategy())
+	}
+}
+
+func TestPoolUpdateAccountsRenamedAccountUsesNewManager(t *testing.T) {
+	pool := &TokenPool{strategy: "round-robin"}
+	a := newTestManager("a", "token-a")
+	pool.managers = []*TokenManager{a}
+
+	pool.UpdateAccounts([]AccountConfig{{Name: "renamed", AuthFile: a.FilePath()}}, "round-robin")
+
+	managers := pool.Managers()
+	if len(managers) != 1 {
+		t.Fatalf("managers = %d, want 1", len(managers))
+	}
+	if managers[0] == a {
+		t.Fatal("renamed account reused old manager")
+	}
+	if managers[0].Name() != "renamed" {
+		t.Fatalf("manager name = %q, want renamed", managers[0].Name())
+	}
+}
+
 func TestPoolIsHealthy(t *testing.T) {
 	pool := &TokenPool{strategy: "round-robin"}
 	pool.managers = []*TokenManager{

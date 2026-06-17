@@ -43,12 +43,44 @@ type TokenPool struct {
 var Pool *TokenPool
 
 func NewTokenPool(accounts []AccountConfig, strategy string) *TokenPool {
+	if strategy == "" {
+		strategy = "round-robin"
+	}
 	p := &TokenPool{strategy: strategy}
 	for _, acc := range accounts {
 		tm := NewTokenManager(acc.Name, acc.AuthFile)
 		p.managers = append(p.managers, tm)
 	}
 	return p
+}
+
+func (p *TokenPool) UpdateAccounts(accounts []AccountConfig, strategy string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	existing := make(map[string]*TokenManager, len(p.managers))
+	for _, tm := range p.managers {
+		existing[accountKey(tm.name, tm.filePath)] = tm
+	}
+
+	managers := make([]*TokenManager, 0, len(accounts))
+	for _, acc := range accounts {
+		key := accountKey(acc.Name, acc.AuthFile)
+		if tm := existing[key]; tm != nil {
+			managers = append(managers, tm)
+			continue
+		}
+		managers = append(managers, NewTokenManager(acc.Name, acc.AuthFile))
+	}
+	p.managers = managers
+	if strategy == "" {
+		strategy = "round-robin"
+	}
+	p.strategy = strategy
+}
+
+func accountKey(name, filePath string) string {
+	return name + "\x00" + filePath
 }
 
 func (p *TokenPool) Acquire() (*TokenHandle, error) {
@@ -112,6 +144,8 @@ func (p *TokenPool) Managers() []*TokenManager {
 }
 
 func (p *TokenPool) Strategy() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.strategy
 }
 
@@ -126,7 +160,7 @@ func (p *TokenPool) StartBackgroundRefresh(ctx context.Context) {
 				slog.Info("pool background refresh stopped")
 				return
 			case <-ticker.C:
-				for _, tm := range p.managers {
+				for _, tm := range p.Managers() {
 					tm.mu.RLock()
 					needsRefresh := tm.authFile != nil &&
 						time.Since(tm.authFile.LastRefresh) > ProactiveRefreshInterval
@@ -141,7 +175,7 @@ func (p *TokenPool) StartBackgroundRefresh(ctx context.Context) {
 					}
 				}
 
-				for _, tm := range p.managers {
+				for _, tm := range p.Managers() {
 					if tm.IsFailed() {
 						slog.Info("retrying failed account", "account", tm.name)
 						if _, err := tm.EnsureFreshToken(); err == nil {

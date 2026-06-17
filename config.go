@@ -12,8 +12,8 @@ import (
 type ProxyConfig struct {
 	Accounts []ProxyAccount `json:"accounts"`
 	Strategy string         `json:"strategy"` // "round-robin" | "random"
-	Host     string         `json:"host"`
-	Port     string         `json:"port"`
+	Host     string         `json:"host,omitempty"`
+	Port     string         `json:"port,omitempty"`
 }
 
 type ProxyAccount struct {
@@ -34,6 +34,33 @@ func loadConfig(path string) (*ProxyConfig, error) {
 		cfg.Accounts[i].AuthFile = expandHome(cfg.Accounts[i].AuthFile)
 	}
 	return &cfg, nil
+}
+
+func loadConfigForWrite(path string) (*ProxyConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg ProxyConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func saveConfig(path string, cfg *ProxyConfig) error {
+	if cfg.Strategy == "" {
+		cfg.Strategy = "round-robin"
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o600)
 }
 
 func defaultConfigPath() string {

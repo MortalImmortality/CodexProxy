@@ -2279,11 +2279,11 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]interface{}, 0, len(managers))
 
 	for _, tm := range managers {
-		token := tm.GetAccessToken()
-		if token == "" {
+		token, err := tm.EnsureFreshToken()
+		if err != nil {
 			results = append(results, map[string]interface{}{
 				"account": tm.Name(),
-				"error":   "no token",
+				"error":   err.Error(),
 			})
 			continue
 		}

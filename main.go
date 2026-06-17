@@ -8,8 +8,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"codex-proxy/auth"
 	"codex-proxy/proxy"
@@ -23,17 +26,21 @@ func main() {
 
 	switch os.Args[1] {
 	case "login":
-		authFile, err := parseLoginArgs(os.Args[2:])
+		loginOpts, err := parseLoginArgs(os.Args[2:])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid login args: %v\n", err)
 			os.Exit(1)
 		}
-		if authFile != "" {
-			auth.SetManagerPath(authFile)
-		}
+		authFile := loginOpts.authFile
+		auth.SetManagerPath(authFile)
 		if err := auth.Login(); err != nil {
 			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
 			os.Exit(1)
+		}
+		if added, err := registerLoginAccount(defaultConfigPath(), loginOpts.name, authFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: login succeeded but account registration failed: %v\n", err)
+		} else if added {
+			fmt.Printf("Registered account in %s\n", defaultConfigPath())
 		}
 
 	case "serve":
@@ -49,13 +56,14 @@ func main() {
 		host := serveOpts.host
 		port := serveOpts.port
 
-		initPool(serveOpts.configPath, &host, &port)
+		configPath := initPool(serveOpts.configPath, &host, &port)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
 		auth.Pool.StartBackgroundRefresh(ctx)
 		defer auth.Pool.Stop()
+		startConfigReloader(ctx, configPath)
 
 		ks, err := loadKeys()
 		if err != nil {
@@ -113,13 +121,27 @@ func main() {
 		}
 
 	case "usage":
-		cmdUsage()
+		if err := cmdUsage(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid usage args: %v\n", err)
+			os.Exit(1)
+		}
 
 	case "doctor":
 		cmdDoctor()
 
 	case "logout":
+		logoutOpts, err := parseLogoutArgs(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid logout args: %v\n", err)
+			os.Exit(1)
+		}
+		auth.SetManagerPath(logoutOpts.authFile)
 		auth.Logout()
+		if removed, err := unregisterLoginAccount(defaultConfigPath(), logoutOpts.authFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: logout succeeded but account registration update failed: %v\n", err)
+		} else if removed {
+			fmt.Printf("Removed account from %s\n", defaultConfigPath())
+		}
 
 	case "install":
 		serviceInstall()
@@ -140,7 +162,7 @@ func main() {
 	}
 }
 
-func initPool(configPath string, host, port *string) {
+func initPool(configPath string, host, port *string) string {
 	if configPath == "" {
 		configPath = defaultConfigPath()
 	}
@@ -152,7 +174,7 @@ func initPool(configPath string, host, port *string) {
 			"round-robin",
 		)
 		slog.Info("single-account mode", "auth_file", auth.DefaultAuthPath())
-		return
+		return configPath
 	}
 
 	if cfg.Host != "" {
@@ -170,6 +192,74 @@ func initPool(configPath string, host, port *string) {
 	slog.Info("multi-account mode",
 		"accounts", len(cfg.Accounts),
 		"strategy", strategy)
+	return configPath
+}
+
+func startConfigReloader(ctx context.Context, configPath string) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		lastSignature, _ := poolConfigSignature(configPath)
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("config reloader stopped")
+				return
+			case <-ticker.C:
+				signature, err := poolConfigSignature(configPath)
+				if err != nil {
+					slog.Warn("proxy config reload skipped", "config", configPath, "error", err)
+					continue
+				}
+				if signature == lastSignature {
+					continue
+				}
+				accounts, strategy, err := loadPoolAccounts(configPath)
+				if err != nil {
+					slog.Warn("proxy config reload skipped", "config", configPath, "error", err)
+					continue
+				}
+				auth.Pool.UpdateAccounts(accounts, strategy)
+				lastSignature = signature
+				slog.Info("proxy config reloaded",
+					"config", configPath,
+					"accounts", len(accounts),
+					"strategy", strategy)
+			}
+		}
+	}()
+}
+
+func loadPoolAccounts(configPath string) ([]auth.AccountConfig, string, error) {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}}, "round-robin", nil
+		}
+		return nil, "", err
+	}
+	strategy := cfg.Strategy
+	if strategy == "" {
+		strategy = "round-robin"
+	}
+	return configToAccountConfigs(cfg), strategy, nil
+}
+
+func poolConfigSignature(configPath string) (string, error) {
+	accounts, strategy, err := loadPoolAccounts(configPath)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(strategy)
+	for _, acc := range accounts {
+		b.WriteByte('\n')
+		b.WriteString(acc.Name)
+		b.WriteByte('\t')
+		b.WriteString(acc.AuthFile)
+	}
+	return b.String(), nil
 }
 
 type serveOptions struct {
@@ -178,20 +268,178 @@ type serveOptions struct {
 	configPath string
 }
 
-func parseLoginArgs(args []string) (string, error) {
+type loginOptions struct {
+	authFile string
+	name     string
+}
+
+type logoutOptions struct {
+	authFile string
+	name     string
+}
+
+func parseLoginArgs(args []string) (loginOptions, error) {
+	opts := loginOptions{}
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	authFile := fs.String("auth-file", "", "auth file path")
+	fs.StringVar(&opts.name, "name", "", "account name in proxy config")
 	if err := fs.Parse(args); err != nil {
-		return "", err
+		return opts, err
 	}
 	if fs.NArg() != 0 {
-		return "", fmt.Errorf("unexpected arguments: %v", fs.Args())
+		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	if *authFile == "" {
-		return "", nil
+	opts.authFile = accountAuthPath(opts.name)
+	return opts, nil
+}
+
+func parseLogoutArgs(args []string) (logoutOptions, error) {
+	opts := logoutOptions{}
+	fs := flag.NewFlagSet("logout", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.name, "name", "", "account name in proxy config")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
 	}
-	return expandHome(*authFile), nil
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	opts.authFile = accountAuthPath(opts.name)
+	return opts, nil
+}
+
+func accountAuthPath(name string) string {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(name) == "default" {
+		return auth.DefaultAuthPath()
+	}
+	return filepath.Join(authStorageDir(), "auth-"+slugifyAccountName(name)+".json")
+}
+
+func authStorageDir() string {
+	return filepath.Dir(auth.DefaultAuthPath())
+}
+
+func slugifyAccountName(name string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" || slug == "default" {
+		return "account"
+	}
+	return slug
+}
+
+func registerLoginAccount(configPath, name, authFile string) (bool, error) {
+	cfg, err := loadConfigForWrite(configPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+		cfg = &ProxyConfig{Strategy: "round-robin"}
+		defaultAuthPath := auth.DefaultAuthPath()
+		if cleanPath(authFile) != cleanPath(defaultAuthPath) && fileExists(defaultAuthPath) {
+			cfg.Accounts = append(cfg.Accounts, ProxyAccount{
+				Name:     uniqueAccountName(cfg, "default", ""),
+				AuthFile: defaultAuthPath,
+			})
+		}
+	}
+
+	for i := range cfg.Accounts {
+		if cleanPath(cfg.Accounts[i].AuthFile) == cleanPath(authFile) {
+			if name != "" && cfg.Accounts[i].Name != name {
+				cfg.Accounts[i].Name = name
+				return true, saveConfig(configPath, cfg)
+			}
+			return false, nil
+		}
+	}
+
+	if name == "" {
+		name = inferAccountName(authFile)
+	}
+	name = uniqueAccountName(cfg, name, authFile)
+	cfg.Accounts = append(cfg.Accounts, ProxyAccount{Name: name, AuthFile: authFile})
+	return true, saveConfig(configPath, cfg)
+}
+
+func unregisterLoginAccount(configPath, authFile string) (bool, error) {
+	cfg, err := loadConfigForWrite(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	accounts := cfg.Accounts[:0]
+	removed := false
+	for _, acc := range cfg.Accounts {
+		if cleanPath(acc.AuthFile) == cleanPath(authFile) {
+			removed = true
+			continue
+		}
+		accounts = append(accounts, acc)
+	}
+	if !removed {
+		return false, nil
+	}
+	cfg.Accounts = accounts
+	return true, saveConfig(configPath, cfg)
+}
+
+func inferAccountName(authFile string) string {
+	if cleanPath(authFile) == cleanPath(auth.DefaultAuthPath()) {
+		return "default"
+	}
+	base := strings.TrimSuffix(filepath.Base(authFile), filepath.Ext(authFile))
+	base = strings.TrimPrefix(base, "auth-")
+	if base == "" || base == "auth" {
+		return "account"
+	}
+	return base
+}
+
+func uniqueAccountName(cfg *ProxyConfig, preferred, sameAuthFile string) string {
+	if preferred == "" {
+		preferred = "account"
+	}
+	used := map[string]bool{}
+	for _, acc := range cfg.Accounts {
+		if sameAuthFile != "" && cleanPath(acc.AuthFile) == cleanPath(sameAuthFile) {
+			continue
+		}
+		used[acc.Name] = true
+	}
+	if !used[preferred] {
+		return preferred
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", preferred, i)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func cleanPath(path string) string {
+	return filepath.Clean(expandHome(path))
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func parseServeArgs(args []string) (serveOptions, error) {
@@ -216,15 +464,40 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	return opts, nil
 }
 
-func cmdUsage() {
-	raw := false
-	for _, a := range os.Args[2:] {
-		if a == "--raw" {
-			raw = true
-		}
+type usageOptions struct {
+	raw        bool
+	configPath string
+}
+
+func parseUsageArgs(args []string) (usageOptions, error) {
+	opts := usageOptions{}
+	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&opts.raw, "raw", false, "print raw usage JSON")
+	fs.StringVar(&opts.configPath, "config", "", "config file path")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if opts.configPath != "" {
+		opts.configPath = expandHome(opts.configPath)
+	}
+	return opts, nil
+}
+
+func cmdUsage(args []string) error {
+	opts, err := parseUsageArgs(args)
+	if err != nil {
+		return err
+	}
+	configPath := opts.configPath
+	if configPath == "" {
+		configPath = defaultConfigPath()
 	}
 
-	cfg, err := loadConfig(defaultConfigPath())
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		token, err := auth.Manager.EnsureFreshToken()
 		if err != nil {
@@ -236,12 +509,12 @@ func cmdUsage() {
 			fmt.Fprintf(os.Stderr, "Usage query failed: %v\n", err)
 			os.Exit(1)
 		}
-		if raw {
+		if opts.raw {
 			fmt.Println(info.RawJSON)
-			return
+			return nil
 		}
 		printAccountUsage("default", info)
-		return
+		return nil
 	}
 
 	for _, acc := range cfg.Accounts {
@@ -256,12 +529,13 @@ func cmdUsage() {
 			fmt.Printf("  [%s] usage query failed: %v\n\n", acc.Name, err)
 			continue
 		}
-		if raw {
+		if opts.raw {
 			fmt.Printf("  [%s]\n%s\n\n", acc.Name, info.RawJSON)
 			continue
 		}
 		printAccountUsage(acc.Name, info)
 	}
+	return nil
 }
 
 func printAccountUsage(name string, info *auth.UsageInfo) {
@@ -311,12 +585,12 @@ func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
-  codex-proxy login [--auth-file PATH]                   Login via browser OAuth
+  codex-proxy login [--name NAME]                        Login via browser OAuth
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
-  codex-proxy usage                                      Show account rate limit usage
+  codex-proxy usage [--raw] [--config F]                 Show account rate limit usage
   codex-proxy doctor                                     Diagnose deployment configuration
-  codex-proxy logout                                     Remove stored credentials
+  codex-proxy logout [--name NAME]                       Remove stored credentials
 
 API key management:
   codex-proxy key add [--name NAME] [--key KEY]          Add API key (auto-generate if no --key)
@@ -332,7 +606,7 @@ Service management:
   codex-proxy logs                     Tail service logs
 
 Multi-account:
-  Create ~/.codex-proxy/proxy.json with multiple accounts for load balancing.
+  Login with different --name values; proxy.json is updated automatically.
   See proxy.example.json for format.
 
 After login, any OpenAI-compatible client can use:
