@@ -153,8 +153,10 @@ func serviceUninstallSystemd() {
 
 func serviceUninstallLaunchd() {
 	plistPath := launchAgentPath()
-	if err := runLaunchctl("unload", plistPath); err != nil {
-		fmt.Fprintf(os.Stderr, "  Warning: cannot unload service: %v\n", err)
+	if launchdServiceLoaded() {
+		if err := runLaunchctl("unload", plistPath); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: cannot unload service: %v\n", err)
+		}
 	}
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "  Cannot remove plist file: %v\n", err)
@@ -232,17 +234,29 @@ func serviceLogs() {
 }
 
 func printServiceStatus() {
-	if runtime.GOOS != "linux" {
-		return
+	switch runtime.GOOS {
+	case "linux":
+		if !unitFileExists() {
+			fmt.Println("  Service: not installed (run: codex-proxy install)")
+			return
+		}
+		cmd := exec.Command("systemctl", "--user", "status", serviceName, "--no-pager", "-l")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		_ = cmd.Run()
+	case "darwin":
+		if _, err := os.Stat(launchAgentPath()); err != nil {
+			fmt.Println("  Service: not installed (run: codex-proxy install)")
+			return
+		}
+		cmd := exec.Command("launchctl", "print", launchdServiceTarget())
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Println("  Service: installed but not loaded (run: codex-proxy start)")
+			return
+		}
+		fmt.Print(string(out))
 	}
-	if !unitFileExists() {
-		fmt.Println("  Service: not installed (run: codex-proxy install)")
-		return
-	}
-	cmd := exec.Command("systemctl", "--user", "status", serviceName, "--no-pager", "-l")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
 }
 
 func launchAgentPath() string {
@@ -253,6 +267,14 @@ func launchAgentPath() string {
 func launchdLogPath() string {
 	homeDir, _ := os.UserHomeDir()
 	return filepath.Join(homeDir, ".codex-proxy", "codex-proxy.log")
+}
+
+func launchdServiceTarget() string {
+	return fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+}
+
+func launchdServiceLoaded() bool {
+	return exec.Command("launchctl", "print", launchdServiceTarget()).Run() == nil
 }
 
 func buildLaunchdPlist(execPath, homeDir, logPath string) string {

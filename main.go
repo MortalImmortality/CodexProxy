@@ -87,7 +87,7 @@ func main() {
 				auth.ShowStatusForFile(acc.Name, expandHome(acc.AuthFile))
 			}
 		}
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
 			fmt.Println()
 			printServiceStatus()
 		}
