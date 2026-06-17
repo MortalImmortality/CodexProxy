@@ -504,6 +504,14 @@ func anthropicToChatRequest(req map[string]interface{}) map[string]interface{} {
 	if v, ok := req["max_tokens"]; ok {
 		chatReq["max_tokens"] = v
 	}
+	if tools, ok := req["tools"].([]interface{}); ok {
+		chatReq["tools"] = anthropicToolsToChat(tools)
+	}
+	if toolChoice, ok := req["tool_choice"]; ok {
+		if converted := anthropicToolChoiceToChat(toolChoice); converted != nil {
+			chatReq["tool_choice"] = converted
+		}
+	}
 	return chatReq
 }
 
@@ -534,13 +542,46 @@ func anthropicMessagesToChat(req map[string]interface{}) []interface{} {
 			if role == "" {
 				role = "user"
 			}
-			messages = append(messages, map[string]interface{}{
-				"role":    role,
-				"content": anthropicContentToChat(msg["content"]),
-			})
+			messages = append(messages, anthropicMessageToChat(role, msg["content"])...)
 		}
 	}
 	return messages
+}
+
+func anthropicMessageToChat(role string, content interface{}) []interface{} {
+	if role == "assistant" {
+		textContent, toolCalls := anthropicAssistantContentToChat(content)
+		msg := map[string]interface{}{"role": "assistant"}
+		if textContent != nil {
+			msg["content"] = textContent
+		} else {
+			msg["content"] = ""
+		}
+		if len(toolCalls) > 0 {
+			msg["tool_calls"] = toolCalls
+		}
+		return []interface{}{msg}
+	}
+
+	if role == "user" {
+		textContent, toolResults := anthropicUserContentToChat(content)
+		var out []interface{}
+		if textContent != nil {
+			out = append(out, map[string]interface{}{
+				"role":    "user",
+				"content": textContent,
+			})
+		}
+		out = append(out, toolResults...)
+		if len(out) > 0 {
+			return out
+		}
+	}
+
+	return []interface{}{map[string]interface{}{
+		"role":    role,
+		"content": anthropicContentToChat(content),
+	}}
 }
 
 func anthropicSystemText(system interface{}) string {
@@ -603,6 +644,158 @@ func anthropicContentToChat(content interface{}) interface{} {
 	}
 }
 
+func anthropicAssistantContentToChat(content interface{}) (interface{}, []interface{}) {
+	switch v := content.(type) {
+	case string:
+		return v, nil
+	case []interface{}:
+		var textParts []interface{}
+		var toolCalls []interface{}
+		for _, raw := range v {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch part["type"] {
+			case "text":
+				textParts = append(textParts, map[string]interface{}{
+					"type": "text",
+					"text": part["text"],
+				})
+			case "tool_use":
+				id, _ := part["id"].(string)
+				name, _ := part["name"].(string)
+				args, _ := json.Marshal(part["input"])
+				toolCalls = append(toolCalls, map[string]interface{}{
+					"id":   id,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      name,
+						"arguments": string(args),
+					},
+				})
+			}
+		}
+		if len(textParts) == 0 {
+			return nil, toolCalls
+		}
+		return textParts, toolCalls
+	default:
+		return nil, nil
+	}
+}
+
+func anthropicUserContentToChat(content interface{}) (interface{}, []interface{}) {
+	switch v := content.(type) {
+	case string:
+		return v, nil
+	case []interface{}:
+		var parts []interface{}
+		var toolResults []interface{}
+		for _, raw := range v {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch part["type"] {
+			case "tool_result":
+				id, _ := part["tool_use_id"].(string)
+				toolResults = append(toolResults, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": id,
+					"content":      anthropicToolResultText(part["content"]),
+				})
+			case "text", "image":
+				converted := anthropicContentToChat([]interface{}{part})
+				if convertedParts, ok := converted.([]interface{}); ok {
+					parts = append(parts, convertedParts...)
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return nil, toolResults
+		}
+		return parts, toolResults
+	default:
+		return nil, nil
+	}
+}
+
+func anthropicToolResultText(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, raw := range v {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if part["type"] == "text" {
+				if text, _ := part["text"].(string); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		if v == nil {
+			return ""
+		}
+		body, _ := json.Marshal(v)
+		return string(body)
+	}
+}
+
+func anthropicToolsToChat(tools []interface{}) []interface{} {
+	out := make([]interface{}, 0, len(tools))
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn := map[string]interface{}{}
+		for _, key := range []string{"name", "description"} {
+			if v, ok := tool[key]; ok {
+				fn[key] = v
+			}
+		}
+		if schema, ok := tool["input_schema"]; ok {
+			fn["parameters"] = schema
+		}
+		out = append(out, map[string]interface{}{
+			"type":     "function",
+			"function": fn,
+		})
+	}
+	return out
+}
+
+func anthropicToolChoiceToChat(choice interface{}) interface{} {
+	choiceMap, ok := choice.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	switch choiceMap["type"] {
+	case "auto":
+		return "auto"
+	case "any":
+		return "required"
+	case "tool":
+		name, _ := choiceMap["name"].(string)
+		if name == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type":     "function",
+			"function": map[string]interface{}{"name": name},
+		}
+	default:
+		return nil
+	}
+}
+
 func anthropicImageURL(part map[string]interface{}) string {
 	source, ok := part["source"].(map[string]interface{})
 	if !ok {
@@ -625,20 +818,66 @@ func convertToAnthropicFormat(respBody []byte, model string) []byte {
 		return respBody
 	}
 	message, finishReason := extractMessage(codexResp)
-	content, _ := message["content"].(string)
+	content := anthropicResponseContent(message)
 	usage := anthropicUsage(codexResp["usage"])
 	resp := map[string]interface{}{
 		"id":            codexResp["id"],
 		"type":          "message",
 		"role":          "assistant",
 		"model":         model,
-		"content":       []interface{}{map[string]interface{}{"type": "text", "text": content}},
+		"content":       content,
 		"stop_reason":   anthropicStopReason(finishReason),
 		"stop_sequence": nil,
 		"usage":         usage,
 	}
 	result, _ := json.Marshal(resp)
 	return result
+}
+
+func anthropicResponseContent(message map[string]interface{}) []interface{} {
+	var content []interface{}
+	if text, _ := message["content"].(string); text != "" {
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": text,
+		})
+	}
+	if toolCalls, ok := message["tool_calls"].([]interface{}); ok {
+		for _, raw := range toolCalls {
+			call, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := call["id"].(string)
+			fn, _ := call["function"].(map[string]interface{})
+			if fn == nil {
+				continue
+			}
+			name, _ := fn["name"].(string)
+			argsRaw, _ := fn["arguments"].(string)
+			content = append(content, map[string]interface{}{
+				"type":  "tool_use",
+				"id":    id,
+				"name":  name,
+				"input": parseToolArguments(argsRaw),
+			})
+		}
+	}
+	if len(content) == 0 {
+		content = append(content, map[string]interface{}{"type": "text", "text": ""})
+	}
+	return content
+}
+
+func parseToolArguments(args string) interface{} {
+	if strings.TrimSpace(args) == "" {
+		return map[string]interface{}{}
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		return map[string]interface{}{}
+	}
+	return parsed
 }
 
 func anthropicUsage(raw interface{}) map[string]int {
@@ -694,6 +933,12 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 
 	id := "msg_" + newUUID()
 	started := false
+	textOpen := false
+	nextBlockIndex := 0
+	textBlockIndex := -1
+	toolBlocks := map[int]int{}
+	openToolBlocks := map[int]bool{}
+	hasToolUse := false
 	var usage map[string]int
 	send := func(event string, payload map[string]interface{}) error {
 		body, _ := json.Marshal(payload)
@@ -703,12 +948,12 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 		flusher.Flush()
 		return nil
 	}
-	startText := func() error {
+	startMessage := func() error {
 		if started {
 			return nil
 		}
 		started = true
-		if err := send("message_start", map[string]interface{}{
+		return send("message_start", map[string]interface{}{
 			"type": "message_start",
 			"message": map[string]interface{}{
 				"id":            id,
@@ -720,26 +965,86 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 				"stop_sequence": nil,
 				"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
 			},
-		}); err != nil {
+		})
+	}
+	startText := func() error {
+		if err := startMessage(); err != nil {
 			return err
 		}
+		if textOpen {
+			return nil
+		}
+		textBlockIndex = nextBlockIndex
+		nextBlockIndex++
+		textOpen = true
 		return send("content_block_start", map[string]interface{}{
 			"type":          "content_block_start",
-			"index":         0,
+			"index":         textBlockIndex,
 			"content_block": map[string]interface{}{"type": "text", "text": ""},
 		})
 	}
+	stopText := func() error {
+		if !textOpen {
+			return nil
+		}
+		textOpen = false
+		return send("content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": textBlockIndex,
+		})
+	}
+	startTool := func(outputIndex int, callID, name string) error {
+		if err := startMessage(); err != nil {
+			return err
+		}
+		if err := stopText(); err != nil {
+			return err
+		}
+		if _, ok := toolBlocks[outputIndex]; ok {
+			return nil
+		}
+		blockIndex := nextBlockIndex
+		nextBlockIndex++
+		toolBlocks[outputIndex] = blockIndex
+		openToolBlocks[outputIndex] = true
+		hasToolUse = true
+		return send("content_block_start", map[string]interface{}{
+			"type":  "content_block_start",
+			"index": blockIndex,
+			"content_block": map[string]interface{}{
+				"type":  "tool_use",
+				"id":    callID,
+				"name":  name,
+				"input": map[string]interface{}{},
+			},
+		})
+	}
+	stopTool := func(outputIndex int) error {
+		blockIndex, ok := toolBlocks[outputIndex]
+		if !ok || !openToolBlocks[outputIndex] {
+			return nil
+		}
+		openToolBlocks[outputIndex] = false
+		return send("content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": blockIndex,
+		})
+	}
 
-	err := scanSSE(resp.Body, maxSSEEventSize, func(ev sseEvent) error {
-		if ev.data == "[DONE]" {
+	err := scanSSE(resp.Body, maxSSEEventSize, func(sse sseEvent) error {
+		data := sse.data
+		if data == "[DONE]" {
 			return errSSEDone
 		}
 		var payload map[string]interface{}
-		if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			return nil
 		}
 		eventType, _ := payload["type"].(string)
 		switch eventType {
+		case "response.created":
+			return startMessage()
+
 		case "response.output_text.delta":
 			delta, _ := payload["delta"].(string)
 			if delta == "" {
@@ -750,9 +1055,58 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 			}
 			return send("content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
-				"index": 0,
+				"index": textBlockIndex,
 				"delta": map[string]interface{}{"type": "text_delta", "text": delta},
 			})
+
+		case "response.output_item.added":
+			var itemEvent struct {
+				OutputIndex int `json:"output_index"`
+				Item        struct {
+					Type   string `json:"type"`
+					CallID string `json:"call_id"`
+					Name   string `json:"name"`
+				} `json:"item"`
+			}
+			if json.Unmarshal([]byte(data), &itemEvent) == nil && itemEvent.Item.Type == "function_call" {
+				return startTool(itemEvent.OutputIndex, itemEvent.Item.CallID, itemEvent.Item.Name)
+			}
+
+		case "response.function_call_arguments.delta":
+			var argsEvent struct {
+				OutputIndex int    `json:"output_index"`
+				Delta       string `json:"delta"`
+				CallID      string `json:"call_id"`
+				Name        string `json:"name"`
+			}
+			if json.Unmarshal([]byte(data), &argsEvent) != nil || argsEvent.Delta == "" {
+				return nil
+			}
+			if _, ok := toolBlocks[argsEvent.OutputIndex]; !ok {
+				if err := startTool(argsEvent.OutputIndex, argsEvent.CallID, argsEvent.Name); err != nil {
+					return err
+				}
+			}
+			return send("content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": toolBlocks[argsEvent.OutputIndex],
+				"delta": map[string]interface{}{
+					"type":         "input_json_delta",
+					"partial_json": argsEvent.Delta,
+				},
+			})
+
+		case "response.output_item.done":
+			var itemEvent struct {
+				OutputIndex int `json:"output_index"`
+				Item        struct {
+					Type string `json:"type"`
+				} `json:"item"`
+			}
+			if json.Unmarshal([]byte(data), &itemEvent) == nil && itemEvent.Item.Type == "function_call" {
+				return stopTool(itemEvent.OutputIndex)
+			}
+
 		case "response.completed":
 			if respObj, ok := payload["response"].(map[string]interface{}); ok {
 				usage = anthropicUsage(respObj["usage"])
@@ -764,18 +1118,22 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 		slog.Error("anthropic stream read error", "error", err)
 	}
 	if !started {
-		_ = startText()
+		_ = startMessage()
 	}
-	_ = send("content_block_stop", map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": 0,
-	})
+	_ = stopText()
+	for outputIndex := range openToolBlocks {
+		_ = stopTool(outputIndex)
+	}
 	if usage == nil {
 		usage = map[string]int{"output_tokens": 0}
 	}
+	stopReason := "end_turn"
+	if hasToolUse {
+		stopReason = "tool_use"
+	}
 	_ = send("message_delta", map[string]interface{}{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
+		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
 		"usage": usage,
 	})
 	_ = send("message_stop", map[string]interface{}{"type": "message_stop"})

@@ -76,6 +76,19 @@ func TestAnthropicToChatRequest(t *testing.T) {
 	req := map[string]interface{}{
 		"model":  "claude-3-5-sonnet-latest",
 		"system": "be concise",
+		"tools": []interface{}{
+			map[string]interface{}{
+				"name":        "get_weather",
+				"description": "Get weather",
+				"input_schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"city": map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+		"tool_choice": map[string]interface{}{"type": "tool", "name": "get_weather"},
 		"messages": []interface{}{
 			map[string]interface{}{
 				"role": "user",
@@ -91,6 +104,27 @@ func TestAnthropicToChatRequest(t *testing.T) {
 					},
 				},
 			},
+			map[string]interface{}{
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":  "tool_use",
+						"id":    "toolu_1",
+						"name":  "get_weather",
+						"input": map[string]interface{}{"city": "Beijing"},
+					},
+				},
+			},
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_1",
+						"content":     "sunny",
+					},
+				},
+			},
 		},
 		"max_tokens": float64(100),
 	}
@@ -100,8 +134,8 @@ func TestAnthropicToChatRequest(t *testing.T) {
 		t.Fatalf("model = %v, want gpt-5.4", chatReq["model"])
 	}
 	messages := chatReq["messages"].([]interface{})
-	if len(messages) != 2 {
-		t.Fatalf("messages len = %d, want 2", len(messages))
+	if len(messages) != 4 {
+		t.Fatalf("messages len = %d, want 4", len(messages))
 	}
 	system := messages[0].(map[string]interface{})
 	if system["role"] != "system" || system["content"] != "be concise" {
@@ -113,6 +147,25 @@ func TestAnthropicToChatRequest(t *testing.T) {
 	imageURL := image["image_url"].(map[string]interface{})
 	if imageURL["url"] != "data:image/png;base64,abc" {
 		t.Fatalf("image url = %v", imageURL["url"])
+	}
+	assistant := messages[2].(map[string]interface{})
+	toolCalls := assistant["tool_calls"].([]interface{})
+	toolCall := toolCalls[0].(map[string]interface{})
+	if toolCall["id"] != "toolu_1" {
+		t.Fatalf("tool call = %#v", toolCall)
+	}
+	toolMsg := messages[3].(map[string]interface{})
+	if toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "toolu_1" || toolMsg["content"] != "sunny" {
+		t.Fatalf("tool result message = %#v", toolMsg)
+	}
+	tools := chatReq["tools"].([]interface{})
+	fn := tools[0].(map[string]interface{})["function"].(map[string]interface{})
+	if fn["name"] != "get_weather" || fn["parameters"] == nil {
+		t.Fatalf("tool conversion = %#v", tools[0])
+	}
+	choice := chatReq["tool_choice"].(map[string]interface{})
+	if choice["type"] != "function" {
+		t.Fatalf("tool_choice = %#v", choice)
 	}
 }
 
@@ -150,6 +203,40 @@ func TestConvertToAnthropicFormat(t *testing.T) {
 	}
 }
 
+func TestConvertToAnthropicFormatWithToolUse(t *testing.T) {
+	codexResp := map[string]interface{}{
+		"id": "resp_123",
+		"output": []interface{}{
+			map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   "toolu_1",
+				"name":      "get_weather",
+				"arguments": `{"city":"Beijing"}`,
+			},
+		},
+		"usage": map[string]interface{}{"input_tokens": 3, "output_tokens": 2},
+	}
+	body, _ := json.Marshal(codexResp)
+
+	result := convertToAnthropicFormat(body, "claude-test")
+	var got map[string]interface{}
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason = %v, want tool_use", got["stop_reason"])
+	}
+	content := got["content"].([]interface{})
+	toolUse := content[0].(map[string]interface{})
+	if toolUse["type"] != "tool_use" || toolUse["id"] != "toolu_1" || toolUse["name"] != "get_weather" {
+		t.Fatalf("tool_use = %#v", toolUse)
+	}
+	input := toolUse["input"].(map[string]interface{})
+	if input["city"] != "Beijing" {
+		t.Fatalf("input = %#v", input)
+	}
+}
+
 func TestStreamAnthropicMessages(t *testing.T) {
 	sse := strings.Join([]string{
 		`event: response.output_text.delta`,
@@ -182,6 +269,43 @@ func TestStreamAnthropicMessages(t *testing.T) {
 	}
 	if strings.Contains(body, "chat.completion.chunk") {
 		t.Fatalf("stream should be Anthropic SSE, got OpenAI chunk:\n%s", body)
+	}
+}
+
+func TestStreamAnthropicMessagesWithToolUse(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"toolu_1","name":"get_weather"},"output_index":0}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","delta":"{\"city\":\"Beijing\"}","output_index":0}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"type":"function_call"},"output_index":0}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":1}}}`,
+		``,
+	}, "\n")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sse))}
+	w := httptest.NewRecorder()
+
+	streamAnthropicMessages(w, resp, "claude-test")
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"event: content_block_start",
+		`"type":"tool_use"`,
+		`"id":"toolu_1"`,
+		`"name":"get_weather"`,
+		`"type":"input_json_delta"`,
+		`"partial_json":"{\"city\":\"Beijing\"}"`,
+		`"stop_reason":"tool_use"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream missing %q:\n%s", want, body)
+		}
 	}
 }
 
