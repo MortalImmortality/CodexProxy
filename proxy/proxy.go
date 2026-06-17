@@ -414,7 +414,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, 405, "method_not_allowed", "POST only")
+		writeAnthropicError(w, 405, "method_not_allowed", "POST only")
 		return
 	}
 
@@ -425,14 +425,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "cannot read request body (max 10MB)")
+		writeAnthropicError(w, 400, "invalid_request_error", "cannot read request body (max 10MB)")
 		return
 	}
 
 	var anthropicReq map[string]interface{}
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "invalid JSON")
+		writeAnthropicError(w, 400, "invalid_request_error", "invalid JSON")
 		return
 	}
 
@@ -446,14 +446,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	codexBody, err := auth.BuildCodexRequestBody(chatReq)
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 500, "internal", "failed to build upstream request")
+		writeAnthropicError(w, 500, "api_error", "failed to build upstream request")
 		return
 	}
 
 	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 502, "upstream_error", err.Error())
+		writeAnthropicError(w, 502, "api_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
@@ -464,8 +464,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		writeAnthropicError(w, resp.StatusCode, anthropicErrorType(resp.StatusCode), upstreamErrorMessage(respBody))
 		return
 	}
 
@@ -477,12 +476,12 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	respObj, err := aggregateCodexResponse(resp.Body)
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 502, "upstream_error", err.Error())
+		writeAnthropicError(w, 502, "api_error", err.Error())
 		return
 	}
 	if respObj == nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 502, "upstream_error", "no response from upstream")
+		writeAnthropicError(w, 502, "api_error", "no response from upstream")
 		return
 	}
 	converted := convertToAnthropicFormat(respObj, clientModel)
@@ -2335,6 +2334,10 @@ func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
 		}
 
 		if !validateKey(key) {
+			if r.URL.Path == "/v1/messages" {
+				writeAnthropicError(w, 401, "authentication_error", "invalid or missing API key")
+				return
+			}
 			writeError(w, 401, "unauthorized", "invalid or missing API key")
 			return
 		}
@@ -2399,4 +2402,58 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+func writeAnthropicError(w http.ResponseWriter, status int, errType, message string) {
+	if errType == "" {
+		errType = anthropicErrorType(status)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errType,
+			"message": message,
+		},
+	})
+}
+
+func anthropicErrorType(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "authentication_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusBadRequest, http.StatusMethodNotAllowed, http.StatusNotFound:
+		return "invalid_request_error"
+	default:
+		return "api_error"
+	}
+}
+
+func upstreamErrorMessage(body []byte) string {
+	var parsed struct {
+		Error interface{} `json:"error"`
+	}
+	if json.Unmarshal(body, &parsed) == nil {
+		switch e := parsed.Error.(type) {
+		case string:
+			if e != "" {
+				return e
+			}
+		case map[string]interface{}:
+			if msg, _ := e["message"].(string); msg != "" {
+				return msg
+			}
+		}
+	}
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		return "upstream error"
+	}
+	if len(msg) > 500 {
+		return msg[:500]
+	}
+	return msg
 }

@@ -309,6 +309,63 @@ func TestStreamAnthropicMessagesWithToolUse(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesInvalidJSONReturnsAnthropicError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{"))
+	w := httptest.NewRecorder()
+
+	handleAnthropicMessages(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["type"] != "error" {
+		t.Fatalf("type = %v, want error", got["type"])
+	}
+	errObj := got["error"].(map[string]interface{})
+	if errObj["type"] != "invalid_request_error" || errObj["message"] != "invalid JSON" {
+		t.Fatalf("error = %#v", errObj)
+	}
+}
+
+func TestAnthropicMessagesAuthErrorShape(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unauthorized request should not reach next handler")
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	w := httptest.NewRecorder()
+
+	withAuth(func(string) bool { return false }, next).ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["type"] != "error" {
+		t.Fatalf("type = %v, want error", got["type"])
+	}
+	errObj := got["error"].(map[string]interface{})
+	if errObj["type"] != "authentication_error" {
+		t.Fatalf("error = %#v", errObj)
+	}
+}
+
+func TestAnthropicErrorHelpers(t *testing.T) {
+	if got := anthropicErrorType(http.StatusTooManyRequests); got != "rate_limit_error" {
+		t.Fatalf("429 error type = %q", got)
+	}
+	body := []byte(`{"error":{"message":"bad upstream"}}`)
+	if got := upstreamErrorMessage(body); got != "bad upstream" {
+		t.Fatalf("upstreamErrorMessage = %q", got)
+	}
+}
+
 func TestExtractContent(t *testing.T) {
 	tests := []struct {
 		name string
