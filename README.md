@@ -415,6 +415,8 @@ Successful logins are registered automatically in `~/.codex-proxy/proxy.json`:
 
 Auth files are always stored in the codex-proxy config directory. By default, `--name alt` writes `~/.codex-proxy/auth-alt.json`; without `--name`, it writes `~/.codex-proxy/auth.json`.
 
+If you upgrade with existing `auth.json` / `auth-*.json` files but no `proxy.json`, the default config is created automatically from those auth files.
+
 When the service is already running, account additions/removals and `strategy` changes in `proxy.json` are reloaded automatically. Active requests keep using their current account; new requests use the updated load-balancing pool.
 
 You only need to edit the file manually for advanced settings such as `host`, `port`, or a custom strategy.

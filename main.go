@@ -87,7 +87,7 @@ func main() {
 		}
 
 	case "status":
-		cfg, err := loadConfig(defaultConfigPath())
+		cfg, err := ensureConfig(defaultConfigPath())
 		if err != nil {
 			auth.ShowStatus()
 		} else {
@@ -167,7 +167,7 @@ func initPool(configPath string, host, port *string) string {
 		configPath = defaultConfigPath()
 	}
 
-	cfg, err := loadConfig(configPath)
+	cfg, err := ensureConfig(configPath)
 	if err != nil {
 		auth.Pool = auth.NewTokenPool(
 			[]auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}},
@@ -232,7 +232,7 @@ func startConfigReloader(ctx context.Context, configPath string) {
 }
 
 func loadPoolAccounts(configPath string) ([]auth.AccountConfig, string, error) {
-	cfg, err := loadConfig(configPath)
+	cfg, err := ensureConfig(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}}, "round-robin", nil
@@ -497,7 +497,7 @@ func cmdUsage(args []string) error {
 		configPath = defaultConfigPath()
 	}
 
-	cfg, err := loadConfig(configPath)
+	cfg, err := ensureConfig(configPath)
 	if err != nil {
 		token, err := auth.Manager.EnsureFreshToken()
 		if err != nil {

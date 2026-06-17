@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"codex-proxy/auth"
@@ -61,6 +62,75 @@ func saveConfig(path string, cfg *ProxyConfig) error {
 	}
 	data = append(data, '\n')
 	return os.WriteFile(path, data, 0o600)
+}
+
+func ensureConfig(path string) (*ProxyConfig, error) {
+	cfg, err := loadConfig(path)
+	if err == nil {
+		return cfg, nil
+	}
+	if !os.IsNotExist(err) || path != defaultConfigPath() {
+		return nil, err
+	}
+	if _, err := bootstrapConfigFromAuthFiles(path); err != nil {
+		return nil, err
+	}
+	return loadConfig(path)
+}
+
+func bootstrapConfigFromAuthFiles(configPath string) (bool, error) {
+	if _, err := os.Stat(configPath); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+
+	authFiles, err := discoverAuthFiles(authStorageDir())
+	if err != nil {
+		return false, err
+	}
+	if len(authFiles) == 0 {
+		return false, os.ErrNotExist
+	}
+
+	cfg := &ProxyConfig{Strategy: "round-robin"}
+	for _, authFile := range authFiles {
+		name := inferAccountName(authFile)
+		name = uniqueAccountName(cfg, name, authFile)
+		cfg.Accounts = append(cfg.Accounts, ProxyAccount{Name: name, AuthFile: authFile})
+	}
+	return true, saveConfig(configPath, cfg)
+}
+
+func discoverAuthFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var authFiles []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "auth.json" || strings.HasPrefix(name, "auth-") && strings.HasSuffix(name, ".json") {
+			authFiles = append(authFiles, filepath.Join(dir, name))
+		}
+	}
+	sort.Slice(authFiles, func(i, j int) bool {
+		if filepath.Base(authFiles[i]) == "auth.json" {
+			return true
+		}
+		if filepath.Base(authFiles[j]) == "auth.json" {
+			return false
+		}
+		return authFiles[i] < authFiles[j]
+	})
+	return authFiles, nil
 }
 
 func defaultConfigPath() string {

@@ -191,6 +191,36 @@ func TestLoadPoolAccountsFallsBackToDefaultWhenConfigMissing(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigBootstrapsExistingAuthFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	defaultAuth := filepath.Join(home, "auth.json")
+	altAuth := filepath.Join(home, "auth-alt.json")
+	if err := os.WriteFile(defaultAuth, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write default auth: %v", err)
+	}
+	if err := os.WriteFile(altAuth, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write alt auth: %v", err)
+	}
+
+	cfg, err := ensureConfig(defaultConfigPath())
+	if err != nil {
+		t.Fatalf("ensureConfig: %v", err)
+	}
+	if len(cfg.Accounts) != 2 {
+		t.Fatalf("accounts = %#v, want default and alt", cfg.Accounts)
+	}
+	if cfg.Accounts[0].Name != "default" || cfg.Accounts[0].AuthFile != defaultAuth {
+		t.Fatalf("first account = %#v, want default", cfg.Accounts[0])
+	}
+	if cfg.Accounts[1].Name != "alt" || cfg.Accounts[1].AuthFile != altAuth {
+		t.Fatalf("second account = %#v, want alt", cfg.Accounts[1])
+	}
+	if _, err := os.Stat(defaultConfigPath()); err != nil {
+		t.Fatalf("proxy config was not written: %v", err)
+	}
+}
+
 func TestParseUsageArgs(t *testing.T) {
 	opts, err := parseUsageArgs([]string{"--raw", "--config", "~/proxy.json"})
 	if err != nil {

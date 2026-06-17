@@ -321,6 +321,8 @@ codex-proxy logout --name alt                             # 删除副账号
 
 auth 文件始终保存在 codex-proxy 配置目录中。默认 `codex-proxy login` 写入 `~/.codex-proxy/auth.json`；`codex-proxy login --name alt` 写入 `~/.codex-proxy/auth-alt.json`。
 
+如果升级前已经有 `auth.json` / `auth-*.json`，但没有 `proxy.json`，默认配置会自动从这些 auth 文件生成。
+
 服务已运行时，新增/删除账号以及修改 `proxy.json` 里的 `strategy` 会自动重新加载。正在处理的请求继续使用当前账号，新请求会使用更新后的负载均衡账号池。
 
 只有需要改 `strategy`、`host`、`port` 等高级设置时，才需要手动编辑。`strategy` 可选 `round-robin`（轮询）或 `random`（随机）。
