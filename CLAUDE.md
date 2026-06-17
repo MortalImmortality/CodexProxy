@@ -10,6 +10,7 @@ go build -o codex-proxy .
 ./codex-proxy serve                 # start proxy on 127.0.0.1:10531
 ./codex-proxy serve --host 0.0.0.0 --port 8080
 ./codex-proxy status                # show auth + service status
+./codex-proxy doctor                # diagnose auth/key/telegram/service/caddy setup
 ./codex-proxy logout                # remove ~/.codex-proxy/auth.json
 ```
 
@@ -46,6 +47,8 @@ codex-proxy.plist        macOS launchd template; install command generates the r
 ```
 
 - **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, optionally starts Telegram monitoring when `CODEX_PROXY_TELEGRAM_BOT_TOKEN` and `CODEX_PROXY_TELEGRAM_CHAT_ID` are set, and does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
+
+- **`doctor.go`** — Deployment diagnostics for auth file, API keys, Telegram bot reachability, service install/running state, and Caddy presence. It reports only; it does not mutate system state.
 
 - **`auth/auth.go`** — Browser-based OAuth with PKCE, token persistence (`~/.codex-proxy/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. Auth requests use `curl` subprocess to avoid Cloudflare TLS fingerprint blocking on VPS.
 

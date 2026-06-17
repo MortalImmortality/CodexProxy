@@ -115,6 +115,9 @@ func main() {
 	case "usage":
 		cmdUsage()
 
+	case "doctor":
+		cmdDoctor()
+
 	case "logout":
 		auth.Logout()
 
@@ -312,6 +315,7 @@ Usage:
   codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage                                      Show account rate limit usage
+  codex-proxy doctor                                     Diagnose deployment configuration
   codex-proxy logout                                     Remove stored credentials
 
 API key management:

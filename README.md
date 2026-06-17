@@ -266,6 +266,7 @@ codex-proxy login [--auth-file PATH]              # 浏览器 OAuth 登录
 codex-proxy serve [--host H] [--port P] [--config F]  # 启动代理
 codex-proxy status                                 # 查看认证 + 服务状态
 codex-proxy usage                                  # 查看账号用量
+codex-proxy doctor                                 # 诊断部署配置
 codex-proxy logout                                 # 删除凭证
 
 codex-proxy key add [--name N] [--key K]           # 添加 API key
@@ -278,6 +279,8 @@ codex-proxy uninstall                              # 卸载服务
 ```
 
 macOS 下 `codex-proxy install` 会为当前用户生成 `~/Library/LaunchAgents/com.local.codex-proxy.plist`，自动写入当前 HOME、二进制路径和日志路径。
+
+`codex-proxy doctor` 会检查 auth 文件、API key、Telegram bot 连通性、systemd/launchd 服务状态，以及 Caddy 是否安装并存在 `/etc/caddy/Caddyfile`。
 
 ## Token 管理
 
