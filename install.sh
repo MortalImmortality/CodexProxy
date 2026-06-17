@@ -98,6 +98,32 @@ if ! command -v codex-proxy &>/dev/null; then
     warn "Add to your shell profile:  export PATH=\"${INSTALL_DIR}:\$PATH\""
 fi
 
+# ── Persist optional service environment ───────
+
+ENV_FILE="${HOME}/.codex-proxy/env"
+persist_env_var() {
+    local name="$1"
+    local value="${!name:-}"
+    [[ -n "$value" ]] || return 0
+
+    mkdir -p "$(dirname "$ENV_FILE")"
+    touch "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+
+    local tmp
+    tmp=$(mktemp)
+    grep -v "^${name}=" "$ENV_FILE" > "$tmp" || true
+    printf '%s=%s\n' "$name" "$value" >> "$tmp"
+    mv "$tmp" "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+}
+
+if [[ -n "${CODEX_PROXY_TELEGRAM_BOT_TOKEN:-}" || -n "${CODEX_PROXY_TELEGRAM_CHAT_ID:-}" ]]; then
+    info "Persisting Telegram service environment to ${ENV_FILE}..."
+    persist_env_var CODEX_PROXY_TELEGRAM_BOT_TOKEN
+    persist_env_var CODEX_PROXY_TELEGRAM_CHAT_ID
+fi
+
 # ── Install systemd service ───────────────────
 
 info "Setting up systemd service..."

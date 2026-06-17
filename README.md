@@ -182,6 +182,23 @@ Bot 只响应 `CODEX_PROXY_TELEGRAM_CHAT_ID` 指定的 chat，其他 chat 会被
 
 如果通过 systemd / launchd 运行，需要把这两个环境变量配置到服务进程环境中；只在当前 shell 里 `export` 后再 `codex-proxy start`，服务进程不一定能继承。
 
+Linux systemd 服务会自动加载 `~/.codex-proxy/env`：
+
+```bash
+mkdir -p ~/.codex-proxy
+chmod 700 ~/.codex-proxy
+cat > ~/.codex-proxy/env <<'EOF'
+CODEX_PROXY_TELEGRAM_BOT_TOKEN=123456:bot-token
+CODEX_PROXY_TELEGRAM_CHAT_ID=123456789
+EOF
+chmod 600 ~/.codex-proxy/env
+
+codex-proxy install
+codex-proxy restart
+```
+
+如果运行 `install.sh` 时当前 shell 已经设置了 `CODEX_PROXY_TELEGRAM_BOT_TOKEN` 和 `CODEX_PROXY_TELEGRAM_CHAT_ID`，安装脚本会自动写入 `~/.codex-proxy/env`。
+
 ## 文生图 / 图生图
 
 Codex 后端支持图片生成（`gpt-image-2`）。代理暴露 OpenAI 兼容的 images 接口。

@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+func TestBuildSystemdUnitLoadsEnvFile(t *testing.T) {
+	unit := buildSystemdUnit(
+		"/usr/local/bin/codex-proxy",
+		"/home/alice",
+		"/home/alice/.codex-proxy/env",
+	)
+
+	for _, want := range []string{
+		"ExecStart=/usr/local/bin/codex-proxy serve",
+		"Environment=HOME=/home/alice",
+		"EnvironmentFile=-/home/alice/.codex-proxy/env",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit missing %q:\n%s", want, unit)
+		}
+	}
+}
+
 func TestBuildLaunchdPlistUsesProvidedPaths(t *testing.T) {
 	plist := buildLaunchdPlist(
 		"/opt/codex-proxy/bin/codex-proxy",

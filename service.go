@@ -35,27 +35,14 @@ func serviceInstallSystemd() {
 	homeDir, _ := os.UserHomeDir()
 	unitDir := filepath.Join(homeDir, ".config", "systemd", "user")
 	unitPath := filepath.Join(unitDir, serviceName+".service")
+	envPath := serviceEnvPath(homeDir)
 
 	if err := os.MkdirAll(unitDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot create %s: %v\n", unitDir, err)
 		os.Exit(1)
 	}
 
-	unit := fmt.Sprintf(`[Unit]
-Description=Codex OAuth API Proxy
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=%s serve
-Restart=on-failure
-RestartSec=5
-Environment=HOME=%s
-
-[Install]
-WantedBy=default.target
-`, execPath, homeDir)
+	unit := buildSystemdUnit(execPath, homeDir, envPath)
 
 	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Cannot write unit file: %v\n", err)
@@ -267,6 +254,29 @@ func launchAgentPath() string {
 func launchdLogPath() string {
 	homeDir, _ := os.UserHomeDir()
 	return filepath.Join(homeDir, ".codex-proxy", "codex-proxy.log")
+}
+
+func serviceEnvPath(homeDir string) string {
+	return filepath.Join(homeDir, ".codex-proxy", "env")
+}
+
+func buildSystemdUnit(execPath, homeDir, envPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Codex OAuth API Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%s serve
+Restart=on-failure
+RestartSec=5
+Environment=HOME=%s
+EnvironmentFile=-%s
+
+[Install]
+WantedBy=default.target
+`, execPath, homeDir, envPath)
 }
 
 func launchdServiceTarget() string {
