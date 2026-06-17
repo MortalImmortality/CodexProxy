@@ -158,6 +158,30 @@ codex-proxy usage
 
 也可通过 HTTP 查询：`GET /usage`
 
+## Telegram 监控
+
+可选启用 Telegram Bot 查询运行状态。配置后，`serve` 启动时会开启 long polling，不需要额外开放端口。
+
+```bash
+export CODEX_PROXY_TELEGRAM_BOT_TOKEN="123456:bot-token"
+export CODEX_PROXY_TELEGRAM_CHAT_ID="123456789"
+codex-proxy serve
+```
+
+支持命令：
+
+```text
+/status   查看 token / account 健康状态
+/usage    查看账号 rate limit 用量
+/metrics  查看请求数、错误数、重试数、token refresh 次数
+/models   查看可用模型
+/help
+```
+
+Bot 只响应 `CODEX_PROXY_TELEGRAM_CHAT_ID` 指定的 chat，其他 chat 会被忽略。Telegram 网络失败只记录日志，不会影响代理服务。
+
+如果通过 systemd / launchd 运行，需要把这两个环境变量配置到服务进程环境中；只在当前 shell 里 `export` 后再 `codex-proxy start`，服务进程不一定能继承。
+
 ## 文生图 / 图生图
 
 Codex 后端支持图片生成（`gpt-image-2`）。代理暴露 OpenAI 兼容的 images 接口。

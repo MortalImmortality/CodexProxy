@@ -44,11 +44,13 @@ install.sh               Linux one-click installer
 codex-proxy.plist        macOS launchd template; install command generates the real file
 ```
 
-- **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
+- **`main.go`** + **`service.go`** — Manual arg parsing, dispatches to auth/proxy/service. `serve` sets up `signal.NotifyContext` for SIGINT/SIGTERM, starts background token refresh, optionally starts Telegram monitoring when `CODEX_PROXY_TELEGRAM_BOT_TOKEN` and `CODEX_PROXY_TELEGRAM_CHAT_ID` are set, and does graceful shutdown. `service.go` wraps `systemctl --user` and `journalctl --user` for the install/start/stop/restart/logs/uninstall subcommands. `install` writes the systemd unit file using the current binary path via `os.Executable()`.
 
 - **`auth/auth.go`** — Browser-based OAuth with PKCE, token persistence (`~/.codex-proxy/auth.json`, shared with Codex CLI), thread-safe `TokenManager` with auto-refresh (7-day staleness, 5-day proactive refresh via background goroutine). `IsHealthy()` reports token usability for health checks. Auth requests use `curl` subprocess to avoid Cloudflare TLS fingerprint blocking on VPS.
 
 - **`proxy/proxy.go`** — HTTP server with OpenAI-compatible endpoints. Two HTTP clients: `normalClient` (60s timeout) and `streamClient` (no overall timeout, 30s response header timeout). `callUpstream` handles 401→refresh-and-retry plus 429/5xx→exponential backoff (max 2 retries). Streaming `/v1/chat/completions` converts Codex SSE events (`response.output_text.delta`, `response.completed`) into OpenAI chat completion chunk format. `/v1/responses` does raw SSE passthrough. JSON and multipart request bodies are capped at 10MB via `http.MaxBytesReader`.
+
+- **`telegram.go`** — Optional Telegram long-polling monitor. It only starts when bot token and allowed chat id env vars are present. Supports `/status`, `/usage`, `/metrics`, `/models`, `/help`; unauthorized chats are ignored and Telegram failures never stop the proxy.
 
 ### Endpoints
 

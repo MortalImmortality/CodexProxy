@@ -64,6 +64,26 @@ var stats struct {
 	tokenRefreshes atomic.Int64
 }
 
+type MetricsSnapshot struct {
+	RequestsTotal  int64 `json:"requests_total"`
+	RequestsActive int64 `json:"requests_active"`
+	ErrorsTotal    int64 `json:"errors_total"`
+	Retries        int64 `json:"retries"`
+	TokenRefreshes int64 `json:"token_refreshes"`
+	UptimeSeconds  int   `json:"uptime_seconds"`
+}
+
+func SnapshotMetrics() MetricsSnapshot {
+	return MetricsSnapshot{
+		RequestsTotal:  stats.requestsTotal.Load(),
+		RequestsActive: stats.requestsActive.Load(),
+		ErrorsTotal:    stats.errorsTotal.Load(),
+		Retries:        stats.retries.Load(),
+		TokenRefreshes: stats.tokenRefreshes.Load(),
+		UptimeSeconds:  int(time.Since(startTime).Seconds()),
+	}
+}
+
 // ──────────────────────────────────────────────
 // Serve starts the OpenAI-compatible API proxy
 // ──────────────────────────────────────────────
@@ -121,14 +141,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"requests_total":  stats.requestsTotal.Load(),
-			"requests_active": stats.requestsActive.Load(),
-			"errors_total":    stats.errorsTotal.Load(),
-			"retries":         stats.retries.Load(),
-			"token_refreshes": stats.tokenRefreshes.Load(),
-			"uptime_seconds":  int(time.Since(startTime).Seconds()),
-		})
+		json.NewEncoder(w).Encode(SnapshotMetrics())
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
