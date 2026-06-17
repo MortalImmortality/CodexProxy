@@ -117,6 +117,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
+	mux.HandleFunc("/v1/messages", handleAnthropicMessages)
 	mux.HandleFunc("/v1/images/generations", makeImageHandler(baseModel))
 	mux.HandleFunc("/v1/images/edits", makeImageEditHandler(baseModel))
 	mux.HandleFunc("/usage", handleUsage)
@@ -155,6 +156,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 			"openai_compatible": true,
 			"endpoints": []string{
 				"/v1/chat/completions",
+				"/v1/messages",
 				"/v1/images/generations",
 				"/v1/images/edits",
 				"/v1/responses",
@@ -404,6 +406,379 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(converted)
 	}
+}
+
+// ──────────────────────────────────────────────
+// /v1/messages → Anthropic-compatible Messages API
+// ──────────────────────────────────────────────
+
+func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method_not_allowed", "POST only")
+		return
+	}
+
+	stats.requestsTotal.Add(1)
+	stats.requestsActive.Add(1)
+	defer stats.requestsActive.Add(-1)
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "cannot read request body (max 10MB)")
+		return
+	}
+
+	var anthropicReq map[string]interface{}
+	if err := json.Unmarshal(body, &anthropicReq); err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 400, "bad_request", "invalid JSON")
+		return
+	}
+
+	clientWantsStream, _ := anthropicReq["stream"].(bool)
+	clientModel, _ := anthropicReq["model"].(string)
+	chatReq := anthropicToChatRequest(anthropicReq)
+
+	// Codex /responses emits SSE; aggregate for non-streaming Anthropic
+	// clients and translate to Anthropic SSE for streaming clients.
+	chatReq["stream"] = true
+	codexBody, err := auth.BuildCodexRequestBody(chatReq)
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 500, "internal", "failed to build upstream request")
+		return
+	}
+
+	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		stats.errorsTotal.Add(1)
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("upstream error",
+			"status", resp.StatusCode,
+			"body", string(respBody[:min(500, len(respBody))]))
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+		return
+	}
+
+	if clientWantsStream {
+		streamAnthropicMessages(w, resp, clientModel)
+		return
+	}
+
+	respObj, err := aggregateCodexResponse(resp.Body)
+	if err != nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", err.Error())
+		return
+	}
+	if respObj == nil {
+		stats.errorsTotal.Add(1)
+		writeError(w, 502, "upstream_error", "no response from upstream")
+		return
+	}
+	converted := convertToAnthropicFormat(respObj, clientModel)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(converted)
+}
+
+func anthropicToChatRequest(req map[string]interface{}) map[string]interface{} {
+	model, _ := req["model"].(string)
+	chatReq := map[string]interface{}{
+		"model":    anthropicUpstreamModel(model),
+		"messages": anthropicMessagesToChat(req),
+	}
+	for _, key := range []string{"temperature", "top_p", "stop"} {
+		if v, ok := req[key]; ok {
+			chatReq[key] = v
+		}
+	}
+	if v, ok := req["max_tokens"]; ok {
+		chatReq["max_tokens"] = v
+	}
+	return chatReq
+}
+
+func anthropicUpstreamModel(model string) string {
+	if model == "" || strings.HasPrefix(model, "claude-") {
+		return "gpt-5.4"
+	}
+	return model
+}
+
+func anthropicMessagesToChat(req map[string]interface{}) []interface{} {
+	var messages []interface{}
+	if system, ok := req["system"]; ok {
+		if text := anthropicSystemText(system); text != "" {
+			messages = append(messages, map[string]interface{}{
+				"role":    "system",
+				"content": text,
+			})
+		}
+	}
+	if raw, ok := req["messages"].([]interface{}); ok {
+		for _, item := range raw {
+			msg, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			role, _ := msg["role"].(string)
+			if role == "" {
+				role = "user"
+			}
+			messages = append(messages, map[string]interface{}{
+				"role":    role,
+				"content": anthropicContentToChat(msg["content"]),
+			})
+		}
+	}
+	return messages
+}
+
+func anthropicSystemText(system interface{}) string {
+	switch v := system.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, p := range v {
+			part, ok := p.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if part["type"] == "text" {
+				if text, _ := part["text"].(string); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func anthropicContentToChat(content interface{}) interface{} {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		parts := make([]interface{}, 0, len(v))
+		for _, raw := range v {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch part["type"] {
+			case "text":
+				parts = append(parts, map[string]interface{}{
+					"type": "text",
+					"text": part["text"],
+				})
+			case "image":
+				if imageURL := anthropicImageURL(part); imageURL != "" {
+					parts = append(parts, map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": imageURL,
+						},
+					})
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return ""
+		}
+		return parts
+	default:
+		return ""
+	}
+}
+
+func anthropicImageURL(part map[string]interface{}) string {
+	source, ok := part["source"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	if source["type"] != "base64" {
+		return ""
+	}
+	mediaType, _ := source["media_type"].(string)
+	data, _ := source["data"].(string)
+	if mediaType == "" || data == "" {
+		return ""
+	}
+	return "data:" + mediaType + ";base64," + data
+}
+
+func convertToAnthropicFormat(respBody []byte, model string) []byte {
+	var codexResp map[string]interface{}
+	if err := json.Unmarshal(respBody, &codexResp); err != nil {
+		return respBody
+	}
+	message, finishReason := extractMessage(codexResp)
+	content, _ := message["content"].(string)
+	usage := anthropicUsage(codexResp["usage"])
+	resp := map[string]interface{}{
+		"id":            codexResp["id"],
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       []interface{}{map[string]interface{}{"type": "text", "text": content}},
+		"stop_reason":   anthropicStopReason(finishReason),
+		"stop_sequence": nil,
+		"usage":         usage,
+	}
+	result, _ := json.Marshal(resp)
+	return result
+}
+
+func anthropicUsage(raw interface{}) map[string]int {
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return map[string]int{"input_tokens": 0, "output_tokens": 0}
+	}
+	openaiUsage := convertUsage(body)
+	if openaiUsage == nil {
+		return map[string]int{"input_tokens": 0, "output_tokens": 0}
+	}
+	return map[string]int{
+		"input_tokens":  intFromInterface(openaiUsage["prompt_tokens"]),
+		"output_tokens": intFromInterface(openaiUsage["completion_tokens"]),
+	}
+}
+
+func intFromInterface(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func anthropicStopReason(finishReason string) string {
+	switch finishReason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	default:
+		return "end_turn"
+	}
+}
+
+func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, 500, "internal", "streaming not supported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+
+	id := "msg_" + newUUID()
+	started := false
+	var usage map[string]int
+	send := func(event string, payload map[string]interface{}) error {
+		body, _ := json.Marshal(payload)
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, body); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+	startText := func() error {
+		if started {
+			return nil
+		}
+		started = true
+		if err := send("message_start", map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id":            id,
+				"type":          "message",
+				"role":          "assistant",
+				"model":         model,
+				"content":       []interface{}{},
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
+			},
+		}); err != nil {
+			return err
+		}
+		return send("content_block_start", map[string]interface{}{
+			"type":          "content_block_start",
+			"index":         0,
+			"content_block": map[string]interface{}{"type": "text", "text": ""},
+		})
+	}
+
+	err := scanSSE(resp.Body, maxSSEEventSize, func(ev sseEvent) error {
+		if ev.data == "[DONE]" {
+			return errSSEDone
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(ev.data), &payload); err != nil {
+			return nil
+		}
+		eventType, _ := payload["type"].(string)
+		switch eventType {
+		case "response.output_text.delta":
+			delta, _ := payload["delta"].(string)
+			if delta == "" {
+				return nil
+			}
+			if err := startText(); err != nil {
+				return err
+			}
+			return send("content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]interface{}{"type": "text_delta", "text": delta},
+			})
+		case "response.completed":
+			if respObj, ok := payload["response"].(map[string]interface{}); ok {
+				usage = anthropicUsage(respObj["usage"])
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errSSEDone) {
+		slog.Error("anthropic stream read error", "error", err)
+	}
+	if !started {
+		_ = startText()
+	}
+	_ = send("content_block_stop", map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	if usage == nil {
+		usage = map[string]int{"output_tokens": 0}
+	}
+	_ = send("message_delta", map[string]interface{}{
+		"type":  "message_delta",
+		"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
+		"usage": usage,
+	})
+	_ = send("message_stop", map[string]interface{}{"type": "message_stop"})
 }
 
 type sseEvent struct {

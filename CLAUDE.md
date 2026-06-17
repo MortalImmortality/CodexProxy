@@ -32,6 +32,7 @@ Local HTTP proxy that lets any OpenAI-compatible SDK hit ChatGPT's Codex backend
 2. Proxy holds/refreshes tokens and listens on `:10531`
 3. Incoming `/v1/chat/completions` requests get translated to Codex `/responses` format and forwarded to `chatgpt.com/backend-api/codex/responses`
 4. Responses get converted back to OpenAI chat completion shape (both streaming SSE and non-streaming)
+5. `/v1/messages` accepts Anthropic Messages-style clients and translates basic text/image requests through the same Codex backend
 
 ## Architecture
 
@@ -57,6 +58,7 @@ codex-proxy.plist        macOS launchd template; install command generates the r
 | Path | Purpose |
 |------|---------|
 | `/v1/chat/completions` | OpenAI-compatible, converts to/from Codex format |
+| `/v1/messages` | Anthropic Messages API basic compatibility, converts to/from Codex format |
 | `/v1/responses` | Codex API passthrough |
 | `/v1/models` | Lists available models (discovered at startup) |
 | `/health` | Returns 200/503 based on token state |

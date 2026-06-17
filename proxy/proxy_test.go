@@ -72,6 +72,119 @@ func TestConvertToOpenAIFormat(t *testing.T) {
 	}
 }
 
+func TestAnthropicToChatRequest(t *testing.T) {
+	req := map[string]interface{}{
+		"model":  "claude-3-5-sonnet-latest",
+		"system": "be concise",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "hello"},
+					map[string]interface{}{
+						"type": "image",
+						"source": map[string]interface{}{
+							"type":       "base64",
+							"media_type": "image/png",
+							"data":       "abc",
+						},
+					},
+				},
+			},
+		},
+		"max_tokens": float64(100),
+	}
+
+	chatReq := anthropicToChatRequest(req)
+	if chatReq["model"] != "gpt-5.4" {
+		t.Fatalf("model = %v, want gpt-5.4", chatReq["model"])
+	}
+	messages := chatReq["messages"].([]interface{})
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want 2", len(messages))
+	}
+	system := messages[0].(map[string]interface{})
+	if system["role"] != "system" || system["content"] != "be concise" {
+		t.Fatalf("system message = %#v", system)
+	}
+	user := messages[1].(map[string]interface{})
+	parts := user["content"].([]interface{})
+	image := parts[1].(map[string]interface{})
+	imageURL := image["image_url"].(map[string]interface{})
+	if imageURL["url"] != "data:image/png;base64,abc" {
+		t.Fatalf("image url = %v", imageURL["url"])
+	}
+}
+
+func TestConvertToAnthropicFormat(t *testing.T) {
+	codexResp := map[string]interface{}{
+		"id": "resp_123",
+		"output": []interface{}{
+			map[string]interface{}{
+				"type": "message",
+				"content": []interface{}{
+					map[string]interface{}{"type": "output_text", "text": "Hello"},
+				},
+			},
+		},
+		"usage": map[string]interface{}{"input_tokens": 3, "output_tokens": 2},
+	}
+	body, _ := json.Marshal(codexResp)
+
+	result := convertToAnthropicFormat(body, "claude-test")
+	var got map[string]interface{}
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["type"] != "message" || got["role"] != "assistant" || got["model"] != "claude-test" {
+		t.Fatalf("anthropic response = %#v", got)
+	}
+	content := got["content"].([]interface{})
+	text := content[0].(map[string]interface{})
+	if text["type"] != "text" || text["text"] != "Hello" {
+		t.Fatalf("content = %#v", content)
+	}
+	usage := got["usage"].(map[string]interface{})
+	if usage["input_tokens"] != float64(3) || usage["output_tokens"] != float64(2) {
+		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestStreamAnthropicMessages(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"pong"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":1}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sse))}
+	w := httptest.NewRecorder()
+
+	streamAnthropicMessages(w, resp, "claude-test")
+
+	body := w.Body.String()
+	for _, want := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		"event: content_block_delta",
+		`"text":"pong"`,
+		"event: content_block_stop",
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "chat.completion.chunk") {
+		t.Fatalf("stream should be Anthropic SSE, got OpenAI chunk:\n%s", body)
+	}
+}
+
 func TestExtractContent(t *testing.T) {
 	tests := []struct {
 		name string

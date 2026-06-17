@@ -249,6 +249,7 @@ resp = client.images.edit(
 | 端点 | 方法 | 认证 | 说明 |
 |------|------|------|------|
 | `/v1/chat/completions` | POST | 需要 | OpenAI 兼容的 Chat Completions API（支持文生图工具） |
+| `/v1/messages` | POST | 需要 | Anthropic Messages API 基础兼容（文本、图片 data URL、基础流式） |
 | `/v1/images/generations` | POST | 需要 | 文生图（OpenAI images API 兼容） |
 | `/v1/images/edits` | POST | 需要 | 图生图（multipart 或 JSON data URL） |
 | `/v1/responses` | POST | 需要 | Codex Responses API 直通 |
