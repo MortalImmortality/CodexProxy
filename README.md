@@ -187,6 +187,7 @@ Bot 只响应 `CODEX_PROXY_TELEGRAM_CHAT_ID` 指定的 chat，其他 chat 会被
 - Auth 健康状态变为 degraded 或恢复 healthy
 - 代理错误计数增加
 - 上游重试计数增加
+- Token refresh 计数增加
 - 代理服务异常退出
 
 错误/重试告警带 5 分钟冷却，避免短时间内刷屏。

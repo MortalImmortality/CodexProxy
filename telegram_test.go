@@ -137,6 +137,32 @@ func TestTelegramMetricAlertCooldown(t *testing.T) {
 	}
 }
 
+func TestTelegramTokenRefreshAlert(t *testing.T) {
+	oldPool := auth.Pool
+	t.Cleanup(func() { auth.Pool = oldPool })
+	auth.Pool = auth.NewTokenPool(nil, "round-robin")
+	healthy, reason := auth.Pool.IsHealthy()
+	current := proxy.SnapshotMetrics()
+	baseline := current
+	baseline.TokenRefreshes = current.TokenRefreshes - 1
+
+	bot := &telegramBot{
+		alertCooldown: time.Minute,
+		lastAlerts:    map[string]time.Time{},
+		alertState: telegramAlertState{
+			initialized: true,
+			healthy:     healthy,
+			reason:      reason,
+			metrics:     baseline,
+		},
+	}
+
+	alerts := bot.checkAlerts(time.Now())
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "Token refresh 发生") {
+		t.Fatalf("alerts = %#v, want token refresh alert", alerts)
+	}
+}
+
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }

@@ -196,6 +196,13 @@ func (b *telegramBot) checkAlerts(now time.Time) []string {
 			fmt.Sprintf("• 错误总数：%d", current.ErrorsTotal),
 		}))
 	}
+	if delta := current.TokenRefreshes - b.alertState.metrics.TokenRefreshes; delta > 0 && b.shouldSendAlert("token_refreshes", now) {
+		alerts = append(alerts, telegramMetricAlertText("🔐", "Token refresh 发生", []string{
+			fmt.Sprintf("• 新增 refresh：%d", delta),
+			fmt.Sprintf("• refresh 总数：%d", current.TokenRefreshes),
+			fmt.Sprintf("• Auth：%s", tgEscape(reason)),
+		}))
+	}
 	b.alertState.metrics = current
 	return alerts
 }
