@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -85,7 +86,7 @@ func startTelegramMonitor(ctx context.Context) {
 
 func (b *telegramBot) run(ctx context.Context) {
 	slog.Info("telegram monitor started", "chat_id", b.cfg.ChatID)
-	if err := b.sendMessage(ctx, b.cfg.ChatID, "codex-proxy started\n\n"+telegramHelpText()); err != nil {
+	if err := b.sendMessage(ctx, b.cfg.ChatID, telegramStartupText()); err != nil {
 		slog.Warn("telegram startup notification failed", "error", err)
 	}
 	for {
@@ -187,77 +188,114 @@ func (b *telegramBot) commandResponse(text string) string {
 	case "/models":
 		return telegramModelsText()
 	default:
-		return "Unknown command.\n\n" + telegramHelpText()
+		return "❔ <b>未知命令</b>\n\n" + telegramHelpText()
 	}
+}
+
+func telegramStartupText() string {
+	return strings.Join([]string{
+		"🚀 <b>codex-proxy 已启动</b>",
+		"",
+		"📍 <b>服务</b>",
+		"• 状态：运行中",
+		"• 监控：Telegram 已连接",
+		"",
+		telegramHelpText(),
+	}, "\n")
 }
 
 func telegramHelpText() string {
 	return strings.Join([]string{
-		"Available commands:",
-		"/status - auth and proxy health",
-		"/usage - account usage",
-		"/metrics - proxy counters",
-		"/models - available models",
-		"/help - show this help",
+		"🤖 <b>codex-proxy 监控</b>",
+		"",
+		"<code>/status</code>   健康状态",
+		"<code>/usage</code>    账号用量",
+		"<code>/metrics</code>  运行指标",
+		"<code>/models</code>   可用模型",
+		"<code>/help</code>     帮助",
 	}, "\n")
 }
 
 func telegramStatusText() string {
 	healthy, reason := auth.Pool.IsHealthy()
-	state := "ok"
+	icon := "🟢"
+	title := "状态正常"
+	proxyState := "ok"
 	if !healthy {
-		state = "degraded"
+		icon = "🟡"
+		title = "状态异常"
+		proxyState = "degraded"
 	}
-	return fmt.Sprintf("Status: %s\nAuth: %s", state, reason)
+	return fmt.Sprintf(strings.Join([]string{
+		"%s <b>%s</b>",
+		"",
+		"🔐 <b>Auth</b>",
+		"• 账号：%s",
+		"• 代理：%s",
+	}, "\n"), icon, title, tgEscape(reason), proxyState)
 }
 
 func telegramMetricsText() string {
 	m := proxy.SnapshotMetrics()
 	return fmt.Sprintf(strings.Join([]string{
-		"Metrics:",
-		"requests_total: %d",
-		"requests_active: %d",
-		"errors_total: %d",
-		"retries: %d",
-		"token_refreshes: %d",
-		"uptime_seconds: %d",
-	}, "\n"), m.RequestsTotal, m.RequestsActive, m.ErrorsTotal, m.Retries, m.TokenRefreshes, m.UptimeSeconds)
+		"📈 <b>运行指标</b>",
+		"",
+		"🔁 <b>请求</b>",
+		"• 总数：%d",
+		"• 活跃：%d",
+		"• 错误：%d",
+		"",
+		"🧯 <b>重试</b>",
+		"• 上游重试：%d",
+		"• Token refresh：%d",
+		"",
+		"⏳ <b>Uptime</b>",
+		"• %s",
+	}, "\n"), m.RequestsTotal, m.RequestsActive, m.ErrorsTotal, m.Retries, m.TokenRefreshes, formatDuration(m.UptimeSeconds))
 }
 
 func telegramUsageText() string {
 	managers := auth.Pool.Managers()
 	if len(managers) == 0 {
-		return "Usage: no accounts configured"
+		return "📊 <b>账号用量</b>\n\n• 未配置账号"
 	}
 	var lines []string
-	lines = append(lines, "Usage:")
+	lines = append(lines, "📊 <b>账号用量</b>")
 	for _, tm := range managers {
+		lines = append(lines, "")
 		token := tm.GetAccessToken()
 		if token == "" {
-			lines = append(lines, fmt.Sprintf("[%s] no token", tm.Name()))
+			lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(tm.Name())))
+			lines = append(lines, "• 状态：⚠️ no token")
 			continue
 		}
 		info, err := auth.QueryUsage(token)
 		if err != nil {
-			lines = append(lines, fmt.Sprintf("[%s] error: %v", tm.Name(), err))
+			lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(tm.Name())))
+			lines = append(lines, fmt.Sprintf("• 状态：⚠️ %s", tgEscape(err.Error())))
 			continue
 		}
 		label := tm.Name()
 		if info.Email != "" {
 			label = info.Email
 		}
-		status := "allowed"
+		status := "✅ allowed"
 		if info.LimitHit {
-			status = "limit reached"
+			status = "⛔ limit reached"
 		} else if !info.Allowed {
-			status = "not allowed"
+			status = "⚠️ not allowed"
 		}
-		lines = append(lines, fmt.Sprintf("[%s] %s plan=%s", label, status, info.PlanType))
+		lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(label)))
+		lines = append(lines, fmt.Sprintf("• 状态：%s", status))
+		lines = append(lines, fmt.Sprintf("• 计划：%s", tgEscape(info.PlanType)))
 		if len(info.Windows) == 0 {
-			lines = append(lines, "  no rate limit windows")
+			lines = append(lines, "• 无 rate limit 窗口")
 		}
 		for _, w := range info.Windows {
-			lines = append(lines, fmt.Sprintf("  %s: %d%% reset=%s", w.Name, w.UsedPercent, formatReset(w.ResetSecs)))
+			lines = append(lines, "")
+			lines = append(lines, fmt.Sprintf("⏱ <b>%s</b>", tgEscape(w.Name)))
+			lines = append(lines, fmt.Sprintf("• 使用：%d%%", w.UsedPercent))
+			lines = append(lines, fmt.Sprintf("• 重置：%s", formatReset(w.ResetSecs)))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -266,23 +304,29 @@ func telegramUsageText() string {
 func telegramModelsText() string {
 	handle, err := auth.Pool.Acquire()
 	if err != nil {
-		return "Models error: " + err.Error()
+		return "🧠 <b>可用模型</b>\n\n• 错误：" + tgEscape(err.Error())
 	}
 	models, err := auth.DiscoverModels(handle.Token)
 	if err != nil {
-		return "Models error: " + err.Error()
+		return "🧠 <b>可用模型</b>\n\n• 错误：" + tgEscape(err.Error())
 	}
 	if len(models) == 0 {
-		return "Models: none"
+		return "🧠 <b>可用模型</b>\n\n• 暂无"
 	}
 	models = append(models, "gpt-image-2")
-	return "Models:\n" + strings.Join(models, "\n")
+	lines := []string{"🧠 <b>可用模型</b>", ""}
+	for _, model := range models {
+		lines = append(lines, "• <code>"+tgEscape(model)+"</code>")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (b *telegramBot) sendMessage(ctx context.Context, chatID int64, text string) error {
 	payload, err := json.Marshal(map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
+		"chat_id":                  chatID,
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
 	})
 	if err != nil {
 		return err
@@ -315,4 +359,26 @@ func (b *telegramBot) sendMessage(ctx context.Context, chatID int64, text string
 
 func (b *telegramBot) apiURL(method string) string {
 	return strings.TrimRight(b.apiBase, "/") + "/bot" + b.cfg.BotToken + "/" + method
+}
+
+func tgEscape(s string) string {
+	return html.EscapeString(s)
+}
+
+func formatDuration(seconds int) string {
+	if seconds <= 0 {
+		return "0s"
+	}
+	d := time.Duration(seconds) * time.Second
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm%ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
 }

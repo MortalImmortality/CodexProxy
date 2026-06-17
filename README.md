@@ -180,6 +180,8 @@ codex-proxy serve
 
 Bot 只响应 `CODEX_PROXY_TELEGRAM_CHAT_ID` 指定的 chat，其他 chat 会被忽略。Telegram 网络失败只记录日志，不会影响代理服务。
 
+消息使用 Telegram HTML 格式化，包含轻量 emoji、分组标题和等宽命令，便于手机端快速扫读。
+
 如果通过 systemd / launchd 运行，需要把这两个环境变量配置到服务进程环境中；只在当前 shell 里 `export` 后再 `codex-proxy start`，服务进程不一定能继承。
 
 Linux systemd 服务会自动加载 `~/.codex-proxy/env`：

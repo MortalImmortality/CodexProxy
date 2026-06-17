@@ -46,11 +46,29 @@ func TestTelegramCommandResponse(t *testing.T) {
 	if got := bot.commandResponse(""); got != "" {
 		t.Fatalf("empty command = %q, want empty response", got)
 	}
-	if got := bot.commandResponse("/help"); !strings.Contains(got, "/status") {
+	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/status</code>") {
 		t.Fatalf("/help response = %q", got)
 	}
-	if got := bot.commandResponse("/unknown"); !strings.Contains(got, "Unknown command") {
+	if got := bot.commandResponse("/unknown"); !strings.Contains(got, "未知命令") {
 		t.Fatalf("/unknown response = %q", got)
+	}
+}
+
+func TestTelegramMessageFormatting(t *testing.T) {
+	if got := telegramStartupText(); !strings.Contains(got, "🚀 <b>codex-proxy 已启动</b>") {
+		t.Fatalf("startup text = %q", got)
+	}
+	if got := telegramHelpText(); !strings.Contains(got, "🤖 <b>codex-proxy 监控</b>") {
+		t.Fatalf("help text = %q", got)
+	}
+	if got := telegramMetricsText(); !strings.Contains(got, "📈 <b>运行指标</b>") || !strings.Contains(got, "⏳ <b>Uptime</b>") {
+		t.Fatalf("metrics text = %q", got)
+	}
+	if got := tgEscape("a<b&c"); got != "a&lt;b&amp;c" {
+		t.Fatalf("tgEscape = %q", got)
+	}
+	if got := formatDuration(3661); got != "1h1m" {
+		t.Fatalf("formatDuration = %q, want 1h1m", got)
 	}
 }
 
@@ -82,8 +100,10 @@ func TestTelegramIgnoresUnauthorizedChat(t *testing.T) {
 
 func TestTelegramSendMessage(t *testing.T) {
 	var got struct {
-		ChatID int64  `json:"chat_id"`
-		Text   string `json:"text"`
+		ChatID                int64  `json:"chat_id"`
+		Text                  string `json:"text"`
+		ParseMode             string `json:"parse_mode"`
+		DisableWebPagePreview bool   `json:"disable_web_page_preview"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/bottoken/sendMessage" {
@@ -106,6 +126,9 @@ func TestTelegramSendMessage(t *testing.T) {
 	}
 	if got.ChatID != 123 || got.Text != "hello" {
 		t.Fatalf("payload = %#v", got)
+	}
+	if got.ParseMode != "HTML" || !got.DisableWebPagePreview {
+		t.Fatalf("payload formatting fields = %#v", got)
 	}
 }
 
