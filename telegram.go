@@ -20,6 +20,8 @@ import (
 )
 
 const telegramAPIBase = "https://api.telegram.org"
+const telegramAlertInterval = 60 * time.Second
+const telegramAlertCooldown = 5 * time.Minute
 
 type telegramConfig struct {
 	BotToken string
@@ -28,10 +30,21 @@ type telegramConfig struct {
 }
 
 type telegramBot struct {
-	cfg        telegramConfig
-	client     *http.Client
-	apiBase    string
-	nextOffset int64
+	cfg           telegramConfig
+	client        *http.Client
+	apiBase       string
+	nextOffset    int64
+	alertInterval time.Duration
+	alertCooldown time.Duration
+	alertState    telegramAlertState
+	lastAlerts    map[string]time.Time
+}
+
+type telegramAlertState struct {
+	initialized bool
+	healthy     bool
+	reason      string
+	metrics     proxy.MetricsSnapshot
 }
 
 type telegramUpdate struct {
@@ -67,21 +80,25 @@ func telegramConfigFromEnv() (telegramConfig, error) {
 	return telegramConfig{BotToken: token, ChatID: chatID, Enabled: true}, nil
 }
 
-func startTelegramMonitor(ctx context.Context) {
+func startTelegramMonitor(ctx context.Context) *telegramBot {
 	cfg, err := telegramConfigFromEnv()
 	if err != nil {
 		slog.Error("telegram monitor disabled", "error", err)
-		return
+		return nil
 	}
 	if !cfg.Enabled {
-		return
+		return nil
 	}
 	bot := &telegramBot{
-		cfg:     cfg,
-		client:  &http.Client{Timeout: 35 * time.Second},
-		apiBase: telegramAPIBase,
+		cfg:           cfg,
+		client:        &http.Client{Timeout: 35 * time.Second},
+		apiBase:       telegramAPIBase,
+		alertInterval: telegramAlertInterval,
+		alertCooldown: telegramAlertCooldown,
+		lastAlerts:    map[string]time.Time{},
 	}
 	go bot.run(ctx)
+	return bot
 }
 
 func (b *telegramBot) run(ctx context.Context) {
@@ -89,6 +106,12 @@ func (b *telegramBot) run(ctx context.Context) {
 	if err := b.sendMessage(ctx, b.cfg.ChatID, telegramStartupText()); err != nil {
 		slog.Warn("telegram startup notification failed", "error", err)
 	}
+	b.initAlertState()
+	go b.runAlerts(ctx)
+	b.runUpdates(ctx)
+}
+
+func (b *telegramBot) runUpdates(ctx context.Context) {
 	for {
 		updates, err := b.getUpdates(ctx)
 		if err != nil {
@@ -109,6 +132,93 @@ func (b *telegramBot) run(ctx context.Context) {
 			}
 			b.handleUpdate(ctx, update)
 		}
+	}
+}
+
+func (b *telegramBot) runAlerts(ctx context.Context) {
+	ticker := time.NewTicker(b.alertInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, alert := range b.checkAlerts(time.Now()) {
+				if err := b.sendMessage(ctx, b.cfg.ChatID, alert); err != nil {
+					slog.Warn("telegram alert send failed", "error", err)
+				}
+			}
+		}
+	}
+}
+
+func (b *telegramBot) initAlertState() {
+	healthy, reason := auth.Pool.IsHealthy()
+	b.alertState = telegramAlertState{
+		initialized: true,
+		healthy:     healthy,
+		reason:      reason,
+		metrics:     proxy.SnapshotMetrics(),
+	}
+}
+
+func (b *telegramBot) checkAlerts(now time.Time) []string {
+	if !b.alertState.initialized {
+		b.initAlertState()
+		return nil
+	}
+
+	var alerts []string
+	healthy, reason := auth.Pool.IsHealthy()
+	if healthy != b.alertState.healthy || reason != b.alertState.reason {
+		switch {
+		case !healthy:
+			alerts = append(alerts, telegramHealthAlertText(false, reason))
+		case !b.alertState.healthy && healthy:
+			alerts = append(alerts, telegramHealthAlertText(true, reason))
+		}
+		b.alertState.healthy = healthy
+		b.alertState.reason = reason
+	}
+
+	current := proxy.SnapshotMetrics()
+	if delta := current.ErrorsTotal - b.alertState.metrics.ErrorsTotal; delta > 0 && b.shouldSendAlert("errors", now) {
+		alerts = append(alerts, telegramMetricAlertText("🔴", "服务错误增加", []string{
+			fmt.Sprintf("• 新增错误：%d", delta),
+			fmt.Sprintf("• 错误总数：%d", current.ErrorsTotal),
+			fmt.Sprintf("• 请求总数：%d", current.RequestsTotal),
+		}))
+	}
+	if delta := current.Retries - b.alertState.metrics.Retries; delta > 0 && b.shouldSendAlert("retries", now) {
+		alerts = append(alerts, telegramMetricAlertText("🧯", "上游重试增加", []string{
+			fmt.Sprintf("• 新增重试：%d", delta),
+			fmt.Sprintf("• 重试总数：%d", current.Retries),
+			fmt.Sprintf("• 错误总数：%d", current.ErrorsTotal),
+		}))
+	}
+	b.alertState.metrics = current
+	return alerts
+}
+
+func (b *telegramBot) shouldSendAlert(key string, now time.Time) bool {
+	if b.lastAlerts == nil {
+		b.lastAlerts = map[string]time.Time{}
+	}
+	if last, ok := b.lastAlerts[key]; ok && now.Sub(last) < b.alertCooldown {
+		return false
+	}
+	b.lastAlerts[key] = now
+	return true
+}
+
+func (b *telegramBot) sendServiceError(err error) {
+	if b == nil || err == nil {
+		return
+	}
+	alertCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if sendErr := b.sendMessage(alertCtx, b.cfg.ChatID, telegramServiceErrorText(err)); sendErr != nil {
+		slog.Warn("telegram service error alert failed", "error", sendErr)
 	}
 }
 
@@ -319,6 +429,45 @@ func telegramModelsText() string {
 		lines = append(lines, "• <code>"+tgEscape(model)+"</code>")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func telegramHealthAlertText(recovered bool, reason string) string {
+	if recovered {
+		return strings.Join([]string{
+			"🟢 <b>服务恢复</b>",
+			"",
+			"🔐 <b>Auth</b>",
+			"• 状态：healthy",
+			"• 账号：" + tgEscape(reason),
+		}, "\n")
+	}
+	return strings.Join([]string{
+		"🔴 <b>服务异常</b>",
+		"",
+		"🔐 <b>Auth</b>",
+		"• 状态：degraded",
+		"• 原因：" + tgEscape(reason),
+	}, "\n")
+}
+
+func telegramMetricAlertText(icon, title string, rows []string) string {
+	lines := []string{
+		icon + " <b>" + tgEscape(title) + "</b>",
+		"",
+		"📈 <b>运行指标</b>",
+	}
+	lines = append(lines, rows...)
+	return strings.Join(lines, "\n")
+}
+
+func telegramServiceErrorText(err error) string {
+	return strings.Join([]string{
+		"🛑 <b>服务退出</b>",
+		"",
+		"📍 <b>进程</b>",
+		"• 状态：proxy server stopped",
+		"• 错误：" + tgEscape(err.Error()),
+	}, "\n")
 }
 
 func (b *telegramBot) sendMessage(ctx context.Context, chatID int64, text string) error {

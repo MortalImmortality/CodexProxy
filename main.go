@@ -70,9 +70,10 @@ func main() {
 		}
 		validateKey := proxy.KeyValidator(ks.ValidKey)
 
-		startTelegramMonitor(ctx)
+		telegram := startTelegramMonitor(ctx)
 
 		if err := proxy.Serve(ctx, host, port, validateKey); err != nil {
+			telegram.sendServiceError(err)
 			slog.Error("proxy server stopped", "error", err)
 			os.Exit(1)
 		}

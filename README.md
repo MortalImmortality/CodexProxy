@@ -182,6 +182,15 @@ Bot 只响应 `CODEX_PROXY_TELEGRAM_CHAT_ID` 指定的 chat，其他 chat 会被
 
 消息使用 Telegram HTML 格式化，包含轻量 emoji、分组标题和等宽命令，便于手机端快速扫读。
 
+主动告警会在以下情况推送：
+
+- Auth 健康状态变为 degraded 或恢复 healthy
+- 代理错误计数增加
+- 上游重试计数增加
+- 代理服务异常退出
+
+错误/重试告警带 5 分钟冷却，避免短时间内刷屏。
+
 如果通过 systemd / launchd 运行，需要把这两个环境变量配置到服务进程环境中；只在当前 shell 里 `export` 后再 `codex-proxy start`，服务进程不一定能继承。
 
 Linux systemd 服务会自动加载 `~/.codex-proxy/env`：

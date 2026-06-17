@@ -7,6 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"codex-proxy/auth"
+	"codex-proxy/proxy"
 )
 
 func TestTelegramConfigFromEnv(t *testing.T) {
@@ -70,7 +74,72 @@ func TestTelegramMessageFormatting(t *testing.T) {
 	if got := formatDuration(3661); got != "1h1m" {
 		t.Fatalf("formatDuration = %q, want 1h1m", got)
 	}
+	if got := telegramServiceErrorText(assertErr("bad <err>")); !strings.Contains(got, "bad &lt;err&gt;") {
+		t.Fatalf("service error text = %q", got)
+	}
 }
+
+func TestTelegramHealthAlert(t *testing.T) {
+	oldPool := auth.Pool
+	t.Cleanup(func() { auth.Pool = oldPool })
+	auth.Pool = auth.NewTokenPool(nil, "round-robin")
+
+	bot := &telegramBot{
+		alertCooldown: time.Minute,
+		lastAlerts:    map[string]time.Time{},
+		alertState: telegramAlertState{
+			initialized: true,
+			healthy:     true,
+			reason:      "all 1 accounts healthy",
+			metrics:     proxy.SnapshotMetrics(),
+		},
+	}
+
+	alerts := bot.checkAlerts(time.Now())
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %#v, want one health alert", alerts)
+	}
+	if !strings.Contains(alerts[0], "🔴 <b>服务异常</b>") {
+		t.Fatalf("health alert = %q", alerts[0])
+	}
+}
+
+func TestTelegramMetricAlertCooldown(t *testing.T) {
+	oldPool := auth.Pool
+	t.Cleanup(func() { auth.Pool = oldPool })
+	auth.Pool = auth.NewTokenPool(nil, "round-robin")
+	healthy, reason := auth.Pool.IsHealthy()
+	current := proxy.SnapshotMetrics()
+	baseline := current
+	baseline.ErrorsTotal = current.ErrorsTotal - 1
+
+	bot := &telegramBot{
+		alertCooldown: time.Minute,
+		lastAlerts:    map[string]time.Time{},
+		alertState: telegramAlertState{
+			initialized: true,
+			healthy:     healthy,
+			reason:      reason,
+			metrics:     baseline,
+		},
+	}
+
+	now := time.Now()
+	alerts := bot.checkAlerts(now)
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "服务错误增加") {
+		t.Fatalf("alerts = %#v, want one error alert", alerts)
+	}
+
+	bot.alertState.metrics = baseline
+	alerts = bot.checkAlerts(now.Add(30 * time.Second))
+	if len(alerts) != 0 {
+		t.Fatalf("alerts within cooldown = %#v, want none", alerts)
+	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }
 
 func TestTelegramIgnoresUnauthorizedChat(t *testing.T) {
 	sent := false
