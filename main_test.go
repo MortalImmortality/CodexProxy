@@ -9,7 +9,7 @@ import (
 )
 
 func TestParseServeArgs(t *testing.T) {
-	opts, err := parseServeArgs([]string{"--host", "0.0.0.0", "--port", "8080", "--config", "~/proxy.json"})
+	opts, err := parseServeArgs([]string{"--host", "0.0.0.0", "--port", "8080"})
 	if err != nil {
 		t.Fatalf("parseServeArgs: %v", err)
 	}
@@ -18,9 +18,6 @@ func TestParseServeArgs(t *testing.T) {
 	}
 	if opts.port != "8080" {
 		t.Errorf("port = %q, want 8080", opts.port)
-	}
-	if opts.configPath == "~/proxy.json" || opts.configPath == "" {
-		t.Errorf("configPath was not expanded: %q", opts.configPath)
 	}
 }
 
@@ -222,15 +219,12 @@ func TestEnsureConfigBootstrapsExistingAuthFiles(t *testing.T) {
 }
 
 func TestParseUsageArgs(t *testing.T) {
-	opts, err := parseUsageArgs([]string{"--raw", "--config", "~/proxy.json"})
+	opts, err := parseUsageArgs([]string{"--raw"})
 	if err != nil {
 		t.Fatalf("parseUsageArgs: %v", err)
 	}
 	if !opts.raw {
 		t.Fatal("raw = false, want true")
-	}
-	if opts.configPath == "~/proxy.json" || opts.configPath == "" {
-		t.Errorf("configPath was not expanded: %q", opts.configPath)
 	}
 	if _, err := parseUsageArgs([]string{"--unknown"}); err == nil {
 		t.Fatal("expected unknown flag error")

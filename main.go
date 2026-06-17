@@ -56,7 +56,7 @@ func main() {
 		host := serveOpts.host
 		port := serveOpts.port
 
-		configPath := initPool(serveOpts.configPath, &host, &port)
+		configPath := initPool(&host, &port)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -162,11 +162,8 @@ func main() {
 	}
 }
 
-func initPool(configPath string, host, port *string) string {
-	if configPath == "" {
-		configPath = defaultConfigPath()
-	}
-
+func initPool(host, port *string) string {
+	configPath := defaultConfigPath()
 	cfg, err := ensureConfig(configPath)
 	if err != nil {
 		auth.Pool = auth.NewTokenPool(
@@ -263,9 +260,8 @@ func poolConfigSignature(configPath string) (string, error) {
 }
 
 type serveOptions struct {
-	host       string
-	port       string
-	configPath string
+	host string
+	port string
 }
 
 type loginOptions struct {
@@ -451,22 +447,17 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.host, "host", opts.host, "listen host")
 	fs.StringVar(&opts.port, "port", opts.port, "listen port")
-	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	if opts.configPath != "" {
-		opts.configPath = expandHome(opts.configPath)
-	}
 	return opts, nil
 }
 
 type usageOptions struct {
-	raw        bool
-	configPath string
+	raw bool
 }
 
 func parseUsageArgs(args []string) (usageOptions, error) {
@@ -474,15 +465,11 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.raw, "raw", false, "print raw usage JSON")
-	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
-	}
-	if opts.configPath != "" {
-		opts.configPath = expandHome(opts.configPath)
 	}
 	return opts, nil
 }
@@ -492,12 +479,7 @@ func cmdUsage(args []string) error {
 	if err != nil {
 		return err
 	}
-	configPath := opts.configPath
-	if configPath == "" {
-		configPath = defaultConfigPath()
-	}
-
-	cfg, err := ensureConfig(configPath)
+	cfg, err := ensureConfig(defaultConfigPath())
 	if err != nil {
 		token, err := auth.Manager.EnsureFreshToken()
 		if err != nil {
@@ -586,9 +568,9 @@ func printUsage() {
 
 Usage:
   codex-proxy login [--name NAME]                        Login via browser OAuth
-  codex-proxy serve [--host H] [--port P] [--config F]  Start proxy (foreground)
+  codex-proxy serve [--host H] [--port P]              Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
-  codex-proxy usage [--raw] [--config F]                 Show account rate limit usage
+  codex-proxy usage [--raw]                             Show account rate limit usage
   codex-proxy doctor                                     Diagnose deployment configuration
   codex-proxy logout [--name NAME]                       Remove stored credentials
 

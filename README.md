@@ -365,7 +365,6 @@ CLI usage:
 
 ```bash
 codex-proxy usage
-codex-proxy usage --config /path/to/proxy.json
 ```
 
 HTTP usage:
@@ -425,12 +424,6 @@ Start with auto-discovery:
 
 ```bash
 codex-proxy serve
-```
-
-Or specify a config file:
-
-```bash
-codex-proxy serve --config /path/to/proxy.json
 ```
 
 Strategies:
@@ -572,7 +565,7 @@ Keep API key authentication enabled even behind Caddy.
 
 ```bash
 codex-proxy login [--name NAME]
-codex-proxy serve [--host H] [--port P] [--config F]
+codex-proxy serve [--host H] [--port P]
 codex-proxy status
 codex-proxy usage
 codex-proxy doctor
