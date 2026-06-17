@@ -275,7 +275,7 @@ func (b *telegramBot) handleUpdate(ctx context.Context, update telegramUpdate) {
 		slog.Warn("ignored telegram message from unauthorized chat", "chat_id", msg.Chat.ID, "username", username)
 		return
 	}
-	text := b.commandResponse(strings.TrimSpace(msg.Text))
+	text := b.commandResponseWithContext(ctx, strings.TrimSpace(msg.Text))
 	if text == "" {
 		return
 	}
@@ -285,6 +285,10 @@ func (b *telegramBot) handleUpdate(ctx context.Context, update telegramUpdate) {
 }
 
 func (b *telegramBot) commandResponse(text string) string {
+	return b.commandResponseWithContext(context.Background(), text)
+}
+
+func (b *telegramBot) commandResponseWithContext(ctx context.Context, text string) string {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return ""
@@ -304,6 +308,12 @@ func (b *telegramBot) commandResponse(text string) string {
 		return telegramUsageText()
 	case "/models":
 		return telegramModelsText()
+	case "/key":
+		return telegramKeyText()
+	case "/doctor":
+		doctorCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		return telegramDoctorText(doctorCtx)
 	default:
 		return "❔ <b>未知命令</b>\n\n" + telegramHelpText()
 	}
@@ -329,6 +339,8 @@ func telegramHelpText() string {
 		"<code>/usage</code>    账号用量",
 		"<code>/metrics</code>  运行指标",
 		"<code>/models</code>   可用模型",
+		"<code>/key</code>      API Key 状态",
+		"<code>/doctor</code>   部署诊断",
 		"<code>/help</code>     帮助",
 	}, "\n")
 }
@@ -435,6 +447,68 @@ func telegramModelsText() string {
 	for _, model := range models {
 		lines = append(lines, "• <code>"+tgEscape(model)+"</code>")
 	}
+	return strings.Join(lines, "\n")
+}
+
+func telegramKeyText() string {
+	lines := []string{
+		"🔑 <b>API Key 状态</b>",
+		"",
+		"⚠️ <b>敏感信息</b>",
+		"• 当前消息会显示完整 API key",
+		"",
+		"🧩 <b>来源</b>",
+	}
+	if envKey := os.Getenv("CODEX_PROXY_API_KEY"); envKey != "" {
+		lines = append(lines, "• 环境变量：<code>"+tgEscape(envKey)+"</code>")
+	} else {
+		lines = append(lines, "• 环境变量：未设置")
+	}
+	lines = append(lines, "• 文件："+tgEscape(keysFilePath()))
+
+	ks, err := loadKeys()
+	if err != nil {
+		lines = append(lines, "", "📦 <b>本地密钥</b>", "• 状态：⚠️ "+tgEscape(err.Error()))
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "", "📦 <b>本地密钥</b>")
+	if len(ks.Keys) == 0 {
+		lines = append(lines, "• 数量：0")
+		lines = append(lines, "• 状态：未配置，运行 <code>codex-proxy key add</code>")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, fmt.Sprintf("• 数量：%d", len(ks.Keys)))
+	for _, key := range ks.Keys {
+		name := key.Name
+		if name == "" {
+			name = "未命名"
+		}
+		lines = append(lines, fmt.Sprintf("• %s：<code>%s</code>", tgEscape(name), tgEscape(key.Key)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func telegramDoctorText(ctx context.Context) string {
+	checks := runDoctorChecks(ctx)
+	return telegramDoctorTextFromChecks(checks)
+}
+
+func telegramDoctorTextFromChecks(checks []doctorCheck) string {
+	lines := []string{
+		"🩺 <b>部署诊断</b>",
+		"",
+		"📋 <b>检查项</b>",
+	}
+	okCount := 0
+	for _, check := range checks {
+		icon := "❌"
+		if check.OK {
+			icon = "✅"
+			okCount++
+		}
+		lines = append(lines, fmt.Sprintf("• %s %s：%s", icon, tgEscape(check.Name), tgEscape(check.Detail)))
+	}
+	lines = append(lines, "", fmt.Sprintf("📌 <b>结果</b>\n• 通过：%d/%d", okCount, len(checks)))
 	return strings.Join(lines, "\n")
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +55,9 @@ func TestTelegramCommandResponse(t *testing.T) {
 	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/status</code>") {
 		t.Fatalf("/help response = %q", got)
 	}
+	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/key</code>") || !strings.Contains(got, "<code>/doctor</code>") {
+		t.Fatalf("/help response missing new commands = %q", got)
+	}
 	if got := bot.commandResponse("/unknown"); !strings.Contains(got, "未知命令") {
 		t.Fatalf("/unknown response = %q", got)
 	}
@@ -76,6 +81,41 @@ func TestTelegramMessageFormatting(t *testing.T) {
 	}
 	if got := telegramServiceErrorText(assertErr("bad <err>")); !strings.Contains(got, "bad &lt;err&gt;") {
 		t.Fatalf("service error text = %q", got)
+	}
+	if got := telegramDoctorTextFromChecks([]doctorCheck{
+		{Name: "Auth <file>", OK: true, Detail: "ok"},
+		{Name: "Caddy", OK: false, Detail: "missing <conf>"},
+	}); !strings.Contains(got, "🩺 <b>部署诊断</b>") || !strings.Contains(got, "1/2") || !strings.Contains(got, "missing &lt;conf&gt;") {
+		t.Fatalf("doctor text = %q", got)
+	}
+}
+
+func TestTelegramKeyText(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CODEX_PROXY_API_KEY", "env-secret<1>")
+	ks := &KeyStore{Keys: []APIKey{{
+		Key:       "cpx-abcdefghijklmnopqrstuvwxyz<2>",
+		Name:      "prod <key>",
+		CreatedAt: time.Now(),
+	}}}
+	data, err := json.Marshal(ks)
+	if err != nil {
+		t.Fatalf("marshal keys: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "keys.json"), data, 0600); err != nil {
+		t.Fatalf("write keys: %v", err)
+	}
+
+	got := telegramKeyText()
+	if !strings.Contains(got, "🔑 <b>API Key 状态</b>") || !strings.Contains(got, "环境变量：<code>") {
+		t.Fatalf("key text = %q", got)
+	}
+	if !strings.Contains(got, "env-secret&lt;1&gt;") || !strings.Contains(got, "cpx-abcdefghijklmnopqrstuvwxyz&lt;2&gt;") {
+		t.Fatalf("key text missing full escaped keys = %q", got)
+	}
+	if !strings.Contains(got, "prod &lt;key&gt;") || !strings.Contains(got, "⚠️ <b>敏感信息</b>") {
+		t.Fatalf("key text missing labels = %q", got)
 	}
 }
 

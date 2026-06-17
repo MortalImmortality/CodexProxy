@@ -175,6 +175,8 @@ codex-proxy serve
 /usage    查看账号 rate limit 用量
 /metrics  查看请求数、错误数、重试数、token refresh 次数
 /models   查看可用模型
+/key      查看 API key 配置状态（显示完整 key）
+/doctor   查看部署诊断
 /help
 ```
 
