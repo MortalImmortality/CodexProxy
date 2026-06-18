@@ -838,6 +838,9 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	if v, ok := chatReq["tool_choice"]; ok {
 		codexReq["tool_choice"] = convertToolChoice(v)
 	}
+	if reasoning := convertReasoning(chatReq); reasoning != nil {
+		codexReq["reasoning"] = reasoning
+	}
 
 	// temperature/top_p are rejected by reasoning models (gpt-5*, o-series,
 	// codex). Codex CLI never sends them for those. Forward only otherwise.
@@ -867,6 +870,35 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	}
 
 	return json.Marshal(codexReq)
+}
+
+func convertReasoning(chatReq map[string]interface{}) map[string]interface{} {
+	if reasoning, ok := chatReq["reasoning"].(map[string]interface{}); ok {
+		out := make(map[string]interface{}, len(reasoning)+1)
+		for k, v := range reasoning {
+			out[k] = v
+		}
+		if _, ok := out["effort"]; !ok {
+			if effort, ok := reasoningEffort(chatReq); ok {
+				out["effort"] = effort
+			}
+		}
+		return out
+	}
+	if effort, ok := reasoningEffort(chatReq); ok {
+		return map[string]interface{}{"effort": effort}
+	}
+	return nil
+}
+
+func reasoningEffort(chatReq map[string]interface{}) (interface{}, bool) {
+	if effort, ok := chatReq["reasoning_effort"]; ok {
+		return effort, true
+	}
+	if effort, ok := chatReq["effort"]; ok {
+		return effort, true
+	}
+	return nil, false
 }
 
 func convertToolChoice(v interface{}) interface{} {

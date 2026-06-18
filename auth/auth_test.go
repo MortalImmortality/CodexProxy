@@ -66,6 +66,69 @@ func TestBuildCodexRequestBody_NonReasoningSamplingParams(t *testing.T) {
 	}
 }
 
+func TestBuildCodexRequestBody_ReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name    string
+		chatReq map[string]interface{}
+		want    interface{}
+	}{
+		{
+			name: "reasoning object",
+			chatReq: map[string]interface{}{
+				"model": "gpt-5",
+				"reasoning": map[string]interface{}{
+					"effort":  "high",
+					"summary": "auto",
+				},
+			},
+			want: "high",
+		},
+		{
+			name: "reasoning_effort alias",
+			chatReq: map[string]interface{}{
+				"model":            "gpt-5",
+				"reasoning_effort": "medium",
+			},
+			want: "medium",
+		},
+		{
+			name: "top level effort alias",
+			chatReq: map[string]interface{}{
+				"model":  "gpt-5",
+				"effort": "low",
+			},
+			want: "low",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := BuildCodexRequestBody(tt.chatReq)
+			if err != nil {
+				t.Fatalf("BuildCodexRequestBody: %v", err)
+			}
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+
+			reasoning, ok := result["reasoning"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("reasoning = %T, want object", result["reasoning"])
+			}
+			if reasoning["effort"] != tt.want {
+				t.Errorf("reasoning.effort = %v, want %v", reasoning["effort"], tt.want)
+			}
+			if _, ok := result["effort"]; ok {
+				t.Error("top-level effort should be mapped to reasoning.effort")
+			}
+			if _, ok := result["reasoning_effort"]; ok {
+				t.Error("reasoning_effort should be mapped to reasoning.effort")
+			}
+		})
+	}
+}
+
 func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
 	chatReq := map[string]interface{}{
 		"model": "gpt-4.1",
