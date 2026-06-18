@@ -183,6 +183,26 @@ func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
 	}
 }
 
+func TestBuildCodexRequestBody_ConvertsObjectToolChoiceAuto(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model":       "gpt-5",
+		"tool_choice": map[string]interface{}{"type": "auto"},
+	}
+
+	body, err := BuildCodexRequestBody(chatReq)
+	if err != nil {
+		t.Fatalf("BuildCodexRequestBody: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if result["tool_choice"] != "auto" {
+		t.Errorf("tool_choice = %v, want auto", result["tool_choice"])
+	}
+}
+
 func TestBuildCodexRequestBody_ForwardsCompatibleChatParams(t *testing.T) {
 	chatReq := map[string]interface{}{
 		"model":                 "gpt-5",
@@ -208,8 +228,8 @@ func TestBuildCodexRequestBody_ForwardsCompatibleChatParams(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	if result["max_output_tokens"] != float64(512) {
-		t.Errorf("max_output_tokens = %v, want 512", result["max_output_tokens"])
+	if _, ok := result["max_output_tokens"]; ok {
+		t.Error("max_completion_tokens should be dropped for Codex backend")
 	}
 	if result["parallel_tool_calls"] != false {
 		t.Errorf("parallel_tool_calls = %v, want false", result["parallel_tool_calls"])
@@ -239,6 +259,49 @@ func TestBuildCodexRequestBody_ForwardsCompatibleChatParams(t *testing.T) {
 	}
 	if _, ok := result["stop"]; ok {
 		t.Error("stop should still be dropped")
+	}
+}
+
+func TestBuildCodexRequestBody_ConvertsAnthropicStyleTools(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model": "gpt-5",
+		"tools": []interface{}{
+			map[string]interface{}{
+				"name":        "search_files",
+				"description": "Search files by pattern",
+				"input_schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{"type": "string"},
+					},
+					"required": []interface{}{"query"},
+				},
+			},
+		},
+	}
+
+	body, err := BuildCodexRequestBody(chatReq)
+	if err != nil {
+		t.Fatalf("BuildCodexRequestBody: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	tools := result["tools"].([]interface{})
+	tool := tools[0].(map[string]interface{})
+	if tool["type"] != "function" {
+		t.Errorf("tool type = %v, want function", tool["type"])
+	}
+	if tool["name"] != "search_files" {
+		t.Errorf("tool name = %v, want search_files", tool["name"])
+	}
+	if _, ok := tool["parameters"].(map[string]interface{}); !ok {
+		t.Errorf("parameters = %T, want object", tool["parameters"])
+	}
+	if _, ok := tool["input_schema"]; ok {
+		t.Error("input_schema should be mapped to parameters")
 	}
 }
 

@@ -848,10 +848,6 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 			codexReq[key] = v
 		}
 	}
-	if v, ok := chatReq["max_completion_tokens"]; ok {
-		codexReq["max_output_tokens"] = v
-	}
-
 	// temperature/top_p are rejected by reasoning models (gpt-5*, o-series,
 	// codex). Codex CLI never sends them for those. Forward only otherwise.
 	model, _ := chatReq["model"].(string)
@@ -926,8 +922,13 @@ func convertToolChoice(v interface{}) interface{} {
 	if !ok {
 		return v
 	}
-	if choice["type"] != "function" {
-		return choice
+	if t, _ := choice["type"].(string); t != "function" {
+		switch t {
+		case "auto", "none", "required":
+			return t
+		default:
+			return choice
+		}
 	}
 	fn, ok := choice["function"].(map[string]interface{})
 	if !ok {
@@ -960,6 +961,7 @@ func convertFunctionCall(v interface{}) interface{} {
 
 // convertTools flattens Chat-Completions function tools into Responses shape.
 // Chat:      {"type":"function","function":{"name","description","parameters","strict"}}
+// Anthropic: {"name","description","input_schema"}
 // Responses: {"type":"function","name","description","parameters","strict"}
 // Non-function tools (e.g. web_search) pass through unchanged.
 func convertTools(tools []interface{}) []interface{} {
@@ -969,6 +971,25 @@ func convertTools(tools []interface{}) []interface{} {
 		if !ok {
 			out = append(out, t)
 			continue
+		}
+		if _, hasType := tool["type"]; !hasType {
+			if name, ok := tool["name"].(string); ok && name != "" {
+				flat := map[string]interface{}{
+					"type": "function",
+					"name": name,
+				}
+				if v, ok := tool["description"]; ok {
+					flat["description"] = v
+				}
+				if v, ok := tool["input_schema"]; ok {
+					flat["parameters"] = v
+				}
+				if v, ok := tool["strict"]; ok {
+					flat["strict"] = v
+				}
+				out = append(out, flat)
+				continue
+			}
 		}
 		fn, ok := tool["function"].(map[string]interface{})
 		if tool["type"] != "function" || !ok {
