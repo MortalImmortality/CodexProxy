@@ -183,6 +183,106 @@ func TestBuildCodexRequestBody_ConvertsToolsAndResponseFormat(t *testing.T) {
 	}
 }
 
+func TestBuildCodexRequestBody_ForwardsCompatibleChatParams(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model":                 "gpt-5",
+		"max_completion_tokens": 512,
+		"parallel_tool_calls":   false,
+		"verbosity":             "low",
+		"metadata":              map[string]interface{}{"request_id": "req-123"},
+		"response_format":       map[string]interface{}{"type": "json_object"},
+		"reasoning_effort":      "medium",
+		"max_tokens":            100,
+		"max_output_tokens":     200,
+		"temperature":           0.7,
+		"top_p":                 0.9,
+		"stop":                  []interface{}{"END"},
+	}
+
+	body, err := BuildCodexRequestBody(chatReq)
+	if err != nil {
+		t.Fatalf("BuildCodexRequestBody: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	if result["max_output_tokens"] != float64(512) {
+		t.Errorf("max_output_tokens = %v, want 512", result["max_output_tokens"])
+	}
+	if result["parallel_tool_calls"] != false {
+		t.Errorf("parallel_tool_calls = %v, want false", result["parallel_tool_calls"])
+	}
+	if metadata, ok := result["metadata"].(map[string]interface{}); !ok || metadata["request_id"] != "req-123" {
+		t.Errorf("metadata = %v, want request_id", result["metadata"])
+	}
+	text, ok := result["text"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("text = %T, want object", result["text"])
+	}
+	if text["verbosity"] != "low" {
+		t.Errorf("text.verbosity = %v, want low", text["verbosity"])
+	}
+	format := text["format"].(map[string]interface{})
+	if format["type"] != "json_object" {
+		t.Errorf("text.format = %v, want json_object", format)
+	}
+	if _, ok := result["max_tokens"]; ok {
+		t.Error("max_tokens should still be dropped")
+	}
+	if _, ok := result["temperature"]; ok {
+		t.Error("temperature should still be dropped for reasoning models")
+	}
+	if _, ok := result["top_p"]; ok {
+		t.Error("top_p should still be dropped for reasoning models")
+	}
+	if _, ok := result["stop"]; ok {
+		t.Error("stop should still be dropped")
+	}
+}
+
+func TestBuildCodexRequestBody_ConvertsDeprecatedFunctions(t *testing.T) {
+	chatReq := map[string]interface{}{
+		"model": "gpt-4.1",
+		"function_call": map[string]interface{}{
+			"name": "lookup",
+		},
+		"functions": []interface{}{
+			map[string]interface{}{
+				"name":        "lookup",
+				"description": "Lookup a value",
+				"parameters":  map[string]interface{}{"type": "object"},
+			},
+		},
+	}
+
+	body, err := BuildCodexRequestBody(chatReq)
+	if err != nil {
+		t.Fatalf("BuildCodexRequestBody: %v", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	toolChoice := result["tool_choice"].(map[string]interface{})
+	if toolChoice["type"] != "function" || toolChoice["name"] != "lookup" {
+		t.Errorf("tool_choice = %v, want function lookup", toolChoice)
+	}
+	tools := result["tools"].([]interface{})
+	tool := tools[0].(map[string]interface{})
+	if tool["type"] != "function" || tool["name"] != "lookup" {
+		t.Errorf("tool = %v, want function lookup", tool)
+	}
+	if _, ok := result["functions"]; ok {
+		t.Error("functions should be mapped to tools")
+	}
+	if _, ok := result["function_call"]; ok {
+		t.Error("function_call should be mapped to tool_choice")
+	}
+}
+
 func TestTokenManagerIsHealthy(t *testing.T) {
 	tm := &TokenManager{
 		name:     "test",

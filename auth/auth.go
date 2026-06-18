@@ -837,9 +837,19 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	// Params the Codex backend accepts verbatim.
 	if v, ok := chatReq["tool_choice"]; ok {
 		codexReq["tool_choice"] = convertToolChoice(v)
+	} else if v, ok := chatReq["function_call"]; ok {
+		codexReq["tool_choice"] = convertFunctionCall(v)
 	}
 	if reasoning := convertReasoning(chatReq); reasoning != nil {
 		codexReq["reasoning"] = reasoning
+	}
+	for _, key := range []string{"metadata", "parallel_tool_calls"} {
+		if v, ok := chatReq[key]; ok {
+			codexReq[key] = v
+		}
+	}
+	if v, ok := chatReq["max_completion_tokens"]; ok {
+		codexReq["max_output_tokens"] = v
 	}
 
 	// temperature/top_p are rejected by reasoning models (gpt-5*, o-series,
@@ -860,13 +870,23 @@ func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
 	// Chat tools are nested under `function`; Responses wants them flattened.
 	if tools, ok := chatReq["tools"].([]interface{}); ok {
 		codexReq["tools"] = convertTools(tools)
+	} else if functions, ok := chatReq["functions"].([]interface{}); ok {
+		codexReq["tools"] = convertFunctions(functions)
 	}
 
-	// Chat `response_format` → Responses `text.format`.
+	// Chat `response_format` → Responses `text.format`; `verbosity` lives
+	// alongside it as `text.verbosity`.
+	text := map[string]interface{}{}
 	if rf, ok := chatReq["response_format"].(map[string]interface{}); ok {
 		if format := convertResponseFormat(rf); format != nil {
-			codexReq["text"] = map[string]interface{}{"format": format}
+			text["format"] = format
 		}
+	}
+	if v, ok := chatReq["verbosity"]; ok {
+		text["verbosity"] = v
+	}
+	if len(text) > 0 {
+		codexReq["text"] = text
 	}
 
 	return json.Marshal(codexReq)
@@ -923,6 +943,21 @@ func convertToolChoice(v interface{}) interface{} {
 	}
 }
 
+func convertFunctionCall(v interface{}) interface{} {
+	choice, ok := v.(map[string]interface{})
+	if !ok {
+		return v
+	}
+	name, _ := choice["name"].(string)
+	if name == "" {
+		return choice
+	}
+	return map[string]interface{}{
+		"type": "function",
+		"name": name,
+	}
+}
+
 // convertTools flattens Chat-Completions function tools into Responses shape.
 // Chat:      {"type":"function","function":{"name","description","parameters","strict"}}
 // Responses: {"type":"function","name","description","parameters","strict"}
@@ -938,6 +973,27 @@ func convertTools(tools []interface{}) []interface{} {
 		fn, ok := tool["function"].(map[string]interface{})
 		if tool["type"] != "function" || !ok {
 			out = append(out, tool)
+			continue
+		}
+		flat := map[string]interface{}{"type": "function"}
+		for _, k := range []string{"name", "description", "parameters", "strict"} {
+			if v, ok := fn[k]; ok {
+				flat[k] = v
+			}
+		}
+		out = append(out, flat)
+	}
+	return out
+}
+
+// convertFunctions maps deprecated Chat `functions` entries to Responses
+// function tools.
+func convertFunctions(functions []interface{}) []interface{} {
+	out := make([]interface{}, 0, len(functions))
+	for _, f := range functions {
+		fn, ok := f.(map[string]interface{})
+		if !ok {
+			out = append(out, f)
 			continue
 		}
 		flat := map[string]interface{}{"type": "function"}
