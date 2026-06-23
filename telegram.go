@@ -394,7 +394,7 @@ func telegramMetricsText() string {
 
 func telegramLastErrorRows(err *proxy.ErrorDetail) []string {
 	if err == nil {
-		return nil
+		return []string{"• 详情：暂未记录"}
 	}
 	return []string{
 		fmt.Sprintf("• 状态码：%d", err.Status),

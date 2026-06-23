@@ -381,14 +381,12 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", requestBodyLimitError("read request body"))
 		return
 	}
 
 	var chatReq map[string]interface{}
 	if err := json.Unmarshal(body, &chatReq); err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", "invalid JSON")
 		return
 	}
@@ -406,26 +404,23 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatReq["stream"] = true
 	codexBody, err := auth.BuildCodexRequestBody(chatReq)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 500, "internal", "failed to build upstream request")
 		return
 	}
 
 	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		stats.errorsTotal.Add(1)
 		respBody, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
-		recordLastError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
+		recordError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 		return
@@ -436,12 +431,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		respObj, err := aggregateCodexResponse(resp.Body)
 		if err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", err.Error())
 			return
 		}
 		if respObj == nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", "no response from upstream")
 			return
 		}
@@ -467,14 +460,12 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 400, "invalid_request_error", requestBodyLimitError("read request body"))
 		return
 	}
 
 	var anthropicReq map[string]interface{}
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 400, "invalid_request_error", "invalid JSON")
 		return
 	}
@@ -488,21 +479,18 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	chatReq["stream"] = true
 	codexBody, err := auth.BuildCodexRequestBody(chatReq)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 500, "api_error", "failed to build upstream request")
 		return
 	}
 
 	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", codexBody, true)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 502, "api_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		stats.errorsTotal.Add(1)
 		respBody, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
@@ -518,12 +506,10 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	respObj, err := aggregateCodexResponse(resp.Body)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 502, "api_error", err.Error())
 		return
 	}
 	if respObj == nil {
-		stats.errorsTotal.Add(1)
 		writeAnthropicError(w, 502, "api_error", "no response from upstream")
 		return
 	}
@@ -1477,7 +1463,6 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		// OpenAI SDK sends images.edits as multipart with image file(s).
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := r.ParseMultipartForm(maxRequestBodySize); err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 400, "bad_request", requestBodyLimitError("parse multipart form"))
 			return
 		}
@@ -1516,13 +1501,11 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	} else {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 		if err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 400, "bad_request", requestBodyLimitError("read request body"))
 			return
 		}
 		var raw map[string]interface{}
 		if err := json.Unmarshal(body, &raw); err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 400, "bad_request", "invalid JSON")
 			return
 		}
@@ -1533,13 +1516,11 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	}
 
 	if req.Prompt == "" {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", "prompt is required")
 		return
 	}
 
 	if isEdit && len(inputImages) == 0 {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", "edits requires at least one image")
 		return
 	}
@@ -1552,7 +1533,6 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		req.N = 1
 	}
 	if req.N < 0 || req.N > 10 {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", "n must be between 1 and 10")
 		return
 	}
@@ -1608,16 +1588,14 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 	for len(images) < req.N {
 		batch, status, respBody, err := generateImagesOnce(r.Context(), codexReq)
 		if err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", err.Error())
 			return
 		}
 		if status != 200 {
-			stats.errorsTotal.Add(1)
 			slog.Error("upstream image error",
 				"status", status,
 				"body", string(respBody[:min(500, len(respBody))]))
-			recordLastError(status, "upstream_error", upstreamErrorMessage(respBody))
+			recordError(status, "upstream_error", upstreamErrorMessage(respBody))
 			w.WriteHeader(status)
 			w.Write(respBody)
 			return
@@ -1628,7 +1606,6 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		images = append(images, batch...)
 	}
 	if len(images) == 0 {
-		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", "no image generated")
 		return
 	}
@@ -1758,7 +1735,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 400, "bad_request", requestBodyLimitError("read body"))
 		return
 	}
@@ -1774,7 +1750,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		reqMap["stream"] = true
 		upstreamBody, err = json.Marshal(reqMap)
 		if err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 500, "internal", "failed to build upstream request")
 			return
 		}
@@ -1782,16 +1757,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := callUpstream(r.Context(), upstreamBase+"/responses", upstreamBody, true)
 	if err != nil {
-		stats.errorsTotal.Add(1)
 		writeError(w, 502, "upstream_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		stats.errorsTotal.Add(1)
 		respBody, _ := io.ReadAll(resp.Body)
-		recordLastError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
+		recordError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
 		ct := resp.Header.Get("Content-Type")
 		if ct != "" {
 			w.Header().Set("Content-Type", ct)
@@ -1804,12 +1777,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if !isStreaming {
 		respObj, err := aggregateCodexResponse(resp.Body)
 		if err != nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", err.Error())
 			return
 		}
 		if respObj == nil {
-			stats.errorsTotal.Add(1)
 			writeError(w, 502, "upstream_error", "no response from upstream")
 			return
 		}
@@ -2440,7 +2411,7 @@ func (lw *logWriter) Flush() {
 // ──────────────────────────────────────────────
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	recordLastError(status, code, message)
+	recordError(status, code, message)
 	writeErrorBody(w, status, code, message)
 }
 
@@ -2463,7 +2434,7 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, message str
 	if errType == "" {
 		errType = anthropicErrorType(status)
 	}
-	recordLastError(status, errType, message)
+	recordError(status, errType, message)
 	writeAnthropicErrorBody(w, status, errType, message)
 }
 
@@ -2495,6 +2466,11 @@ func recordLastError(status int, errType, message string) {
 		Message: message,
 	}
 	stats.lastErrorMu.Unlock()
+}
+
+func recordError(status int, errType, message string) {
+	recordLastError(status, errType, message)
+	stats.errorsTotal.Add(1)
 }
 
 func anthropicErrorType(status int) string {

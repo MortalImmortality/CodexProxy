@@ -102,6 +102,24 @@ func TestUntrackedErrorDoesNotOverwriteLastError(t *testing.T) {
 	}
 }
 
+func TestWriteErrorIncrementsMetricsWithDetails(t *testing.T) {
+	before := SnapshotMetrics()
+
+	w := httptest.NewRecorder()
+	writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON")
+
+	after := SnapshotMetrics()
+	if after.ErrorsTotal != before.ErrorsTotal+1 {
+		t.Fatalf("ErrorsTotal = %d, want %d", after.ErrorsTotal, before.ErrorsTotal+1)
+	}
+	if after.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if after.LastError.Status != http.StatusBadRequest || after.LastError.Message != "invalid JSON" {
+		t.Fatalf("LastError = %#v", after.LastError)
+	}
+}
+
 func TestAnthropicToChatRequest(t *testing.T) {
 	req := map[string]interface{}{
 		"model":  "claude-3-5-sonnet-latest",
