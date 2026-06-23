@@ -22,13 +22,15 @@ import (
 )
 
 const (
-	upstreamBase       = "https://chatgpt.com/backend-api/codex"
-	maxRequestBodySize = 10 << 20 // 10 MB
-	maxRetries         = 2
-	maxSSEEventSize    = 32 << 20 // 32 MB
+	upstreamBase              = "https://chatgpt.com/backend-api/codex"
+	defaultMaxRequestBodySize = 100 << 20 // 100 MiB
+	maxRetries                = 2
+	maxSSEEventSize           = 32 << 20 // 32 MiB
 )
 
 var (
+	maxRequestBodySize int64 = defaultMaxRequestBodySize
+
 	normalClient = &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -51,6 +53,28 @@ var (
 
 	startTime = time.Now()
 )
+
+func SetMaxRequestBodySize(size int64) {
+	if size > 0 {
+		maxRequestBodySize = size
+	}
+}
+
+func MaxRequestBodySize() int64 {
+	return maxRequestBodySize
+}
+
+func requestBodyLimitError(action string) string {
+	return fmt.Sprintf("cannot %s (max %s)", action, formatByteSize(maxRequestBodySize))
+}
+
+func formatByteSize(size int64) string {
+	const mib = int64(1 << 20)
+	if size%mib == 0 {
+		return fmt.Sprintf("%dMiB", size/mib)
+	}
+	return fmt.Sprintf("%d bytes", size)
+}
 
 // ──────────────────────────────────────────────
 // Metrics
@@ -340,7 +364,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "cannot read request body (max 10MB)")
+		writeError(w, 400, "bad_request", requestBodyLimitError("read request body"))
 		return
 	}
 
@@ -425,7 +449,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeAnthropicError(w, 400, "invalid_request_error", "cannot read request body (max 10MB)")
+		writeAnthropicError(w, 400, "invalid_request_error", requestBodyLimitError("read request body"))
 		return
 	}
 
@@ -1435,7 +1459,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		if err := r.ParseMultipartForm(maxRequestBodySize); err != nil {
 			stats.errorsTotal.Add(1)
-			writeError(w, 400, "bad_request", "cannot parse multipart form")
+			writeError(w, 400, "bad_request", requestBodyLimitError("parse multipart form"))
 			return
 		}
 		req.Prompt = r.FormValue("prompt")
@@ -1474,7 +1498,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 		if err != nil {
 			stats.errorsTotal.Add(1)
-			writeError(w, 400, "bad_request", "cannot read request body")
+			writeError(w, 400, "bad_request", requestBodyLimitError("read request body"))
 			return
 		}
 		var raw map[string]interface{}
@@ -1715,7 +1739,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	if err != nil {
 		stats.errorsTotal.Add(1)
-		writeError(w, 400, "bad_request", "cannot read body (max 10MB)")
+		writeError(w, 400, "bad_request", requestBodyLimitError("read body"))
 		return
 	}
 

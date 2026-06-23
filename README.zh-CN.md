@@ -261,11 +261,13 @@ resp = client.images.edit(
 | `/metrics` | GET | 需要 | 运行指标（请求数、错误数、重试次数、uptime） |
 | `/usage` | GET | 需要 | 各账号 rate limit 用量 |
 
+请求体默认限制为 100 MiB。可通过 `codex-proxy serve --max-body-mb N` 或 `CODEX_PROXY_MAX_REQUEST_BODY_MB=N` 调整。SSE 单个事件行限制为 32 MiB。
+
 ## CLI 命令
 
 ```bash
 codex-proxy login [--name NAME]                  # 浏览器 OAuth 登录
-codex-proxy serve [--host H] [--port P]             # 启动代理
+codex-proxy serve [--host H] [--port P] [--max-body-mb N]  # 启动代理
 codex-proxy status                                 # 查看认证 + 服务状态
 codex-proxy usage                                  # 查看账号用量
 codex-proxy doctor                                 # 诊断部署配置

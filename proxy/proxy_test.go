@@ -608,6 +608,10 @@ func TestBuildStreamChunk(t *testing.T) {
 }
 
 func TestHandleImageRejectsOversizedMultipart(t *testing.T) {
+	oldMax := MaxRequestBodySize()
+	SetMaxRequestBodySize(1024)
+	defer SetMaxRequestBodySize(oldMax)
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	if err := writer.WriteField("prompt", "edit this image"); err != nil {
@@ -617,7 +621,7 @@ func TestHandleImageRejectsOversizedMultipart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create form file: %v", err)
 	}
-	if _, err := part.Write(bytes.Repeat([]byte("x"), maxRequestBodySize+1)); err != nil {
+	if _, err := part.Write(bytes.Repeat([]byte("x"), int(MaxRequestBodySize())+1)); err != nil {
 		t.Fatalf("write image: %v", err)
 	}
 	if err := writer.Close(); err != nil {

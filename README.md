@@ -256,7 +256,7 @@ codex-proxy key delete <key-or-name>
 | `/usage` | GET | Yes | Account rate-limit usage |
 | `/metrics` | GET | Yes | Request, error, retry, token refresh, and uptime counters |
 
-Request bodies are capped at 10 MB. SSE event lines are capped at 32 MB.
+Request bodies are capped at 100 MiB by default. Override with `codex-proxy serve --max-body-mb N` or `CODEX_PROXY_MAX_REQUEST_BODY_MB=N`. SSE event lines are capped at 32 MiB.
 
 ## OpenAI Chat Completions
 
@@ -565,7 +565,7 @@ Keep API key authentication enabled even behind Caddy.
 
 ```bash
 codex-proxy login [--name NAME]
-codex-proxy serve [--host H] [--port P]
+codex-proxy serve [--host H] [--port P] [--max-body-mb N]
 codex-proxy status
 codex-proxy usage
 codex-proxy doctor

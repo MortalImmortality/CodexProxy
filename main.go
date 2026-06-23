@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -55,6 +56,7 @@ func main() {
 		}
 		host := serveOpts.host
 		port := serveOpts.port
+		proxy.SetMaxRequestBodySize(int64(serveOpts.maxBodyMB) << 20)
 
 		configPath := initPool(&host, &port)
 
@@ -260,8 +262,9 @@ func poolConfigSignature(configPath string) (string, error) {
 }
 
 type serveOptions struct {
-	host string
-	port string
+	host      string
+	port      string
+	maxBodyMB int
 }
 
 type loginOptions struct {
@@ -439,21 +442,44 @@ func fileExists(path string) bool {
 }
 
 func parseServeArgs(args []string) (serveOptions, error) {
+	maxBodyMB, err := defaultMaxBodyMB()
+	if err != nil {
+		return serveOptions{}, err
+	}
 	opts := serveOptions{
-		host: "127.0.0.1",
-		port: "10531",
+		host:      "127.0.0.1",
+		port:      "10531",
+		maxBodyMB: maxBodyMB,
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.host, "host", opts.host, "listen host")
 	fs.StringVar(&opts.port, "port", opts.port, "listen port")
+	fs.IntVar(&opts.maxBodyMB, "max-body-mb", opts.maxBodyMB, "maximum request body size in MiB")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
+	if opts.maxBodyMB <= 0 {
+		return opts, fmt.Errorf("max-body-mb must be positive")
+	}
 	return opts, nil
+}
+
+func defaultMaxBodyMB() (int, error) {
+	const mib = int64(1 << 20)
+	defaultMB := int(proxy.MaxRequestBodySize() / mib)
+	env := strings.TrimSpace(os.Getenv("CODEX_PROXY_MAX_REQUEST_BODY_MB"))
+	if env == "" {
+		return defaultMB, nil
+	}
+	n, err := strconv.Atoi(env)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("CODEX_PROXY_MAX_REQUEST_BODY_MB must be a positive integer")
+	}
+	return n, nil
 }
 
 type usageOptions struct {
@@ -568,7 +594,7 @@ func printUsage() {
 
 Usage:
   codex-proxy login [--name NAME]                        Login via browser OAuth
-  codex-proxy serve [--host H] [--port P]              Start proxy (foreground)
+  codex-proxy serve [--host H] [--port P] [--max-body-mb N]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage [--raw]                             Show account rate limit usage
   codex-proxy doctor                                     Diagnose deployment configuration

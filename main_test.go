@@ -9,7 +9,9 @@ import (
 )
 
 func TestParseServeArgs(t *testing.T) {
-	opts, err := parseServeArgs([]string{"--host", "0.0.0.0", "--port", "8080"})
+	t.Setenv("CODEX_PROXY_MAX_REQUEST_BODY_MB", "")
+
+	opts, err := parseServeArgs([]string{"--host", "0.0.0.0", "--port", "8080", "--max-body-mb", "64"})
 	if err != nil {
 		t.Fatalf("parseServeArgs: %v", err)
 	}
@@ -19,21 +21,41 @@ func TestParseServeArgs(t *testing.T) {
 	if opts.port != "8080" {
 		t.Errorf("port = %q, want 8080", opts.port)
 	}
+	if opts.maxBodyMB != 64 {
+		t.Errorf("maxBodyMB = %d, want 64", opts.maxBodyMB)
+	}
 }
 
 func TestParseServeArgsDefaultsAndRejectsUnknown(t *testing.T) {
+	t.Setenv("CODEX_PROXY_MAX_REQUEST_BODY_MB", "")
+
 	opts, err := parseServeArgs(nil)
 	if err != nil {
 		t.Fatalf("parseServeArgs defaults: %v", err)
 	}
-	if opts.host != "127.0.0.1" || opts.port != "10531" {
-		t.Fatalf("defaults = %s:%s, want 127.0.0.1:10531", opts.host, opts.port)
+	if opts.host != "127.0.0.1" || opts.port != "10531" || opts.maxBodyMB != 100 {
+		t.Fatalf("defaults = %s:%s maxBodyMB=%d, want 127.0.0.1:10531 maxBodyMB=100", opts.host, opts.port, opts.maxBodyMB)
 	}
 	if _, err := parseServeArgs([]string{"--bad"}); err == nil {
 		t.Fatal("expected unknown flag error")
 	}
 	if _, err := parseServeArgs([]string{"extra"}); err == nil {
 		t.Fatal("expected unexpected positional arg error")
+	}
+	if _, err := parseServeArgs([]string{"--max-body-mb", "0"}); err == nil {
+		t.Fatal("expected invalid max body error")
+	}
+}
+
+func TestParseServeArgsUsesMaxBodyEnv(t *testing.T) {
+	t.Setenv("CODEX_PROXY_MAX_REQUEST_BODY_MB", "256")
+
+	opts, err := parseServeArgs(nil)
+	if err != nil {
+		t.Fatalf("parseServeArgs with env: %v", err)
+	}
+	if opts.maxBodyMB != 256 {
+		t.Fatalf("maxBodyMB = %d, want 256", opts.maxBodyMB)
 	}
 }
 
