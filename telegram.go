@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"codex-proxy/auth"
@@ -37,6 +38,7 @@ type telegramBot struct {
 	alertInterval time.Duration
 	alertCooldown time.Duration
 	alertState    telegramAlertState
+	alertMu       sync.Mutex
 	lastAlerts    map[string]time.Time
 }
 
@@ -210,6 +212,8 @@ func (b *telegramBot) checkAlerts(now time.Time) []string {
 }
 
 func (b *telegramBot) shouldSendAlert(key string, now time.Time) bool {
+	b.alertMu.Lock()
+	defer b.alertMu.Unlock()
 	if b.lastAlerts == nil {
 		b.lastAlerts = map[string]time.Time{}
 	}
@@ -218,6 +222,29 @@ func (b *telegramBot) shouldSendAlert(key string, now time.Time) bool {
 	}
 	b.lastAlerts[key] = now
 	return true
+}
+
+func (b *telegramBot) sendRateLimitAlert(_ context.Context, event proxy.UpstreamRateLimitEvent) {
+	if b == nil {
+		return
+	}
+	accountKey := event.AccountName
+	if accountKey == "" {
+		accountKey = event.AccountID
+	}
+	if accountKey == "" {
+		accountKey = "unknown"
+	}
+	if !b.shouldSendAlert("quota:"+accountKey, time.Now()) {
+		return
+	}
+	go func() {
+		alertCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := b.sendMessage(alertCtx, b.cfg.ChatID, telegramRateLimitAlertText(event)); err != nil {
+			slog.Warn("telegram rate limit alert failed", "error", err)
+		}
+	}()
 }
 
 func (b *telegramBot) sendServiceError(err error) {
@@ -402,6 +429,40 @@ func telegramLastErrorRows(err *proxy.ErrorDetail) []string {
 		"• 消息：" + tgEscape(err.Message),
 		"• 时间：" + tgEscape(err.Time.Format("2006-01-02 15:04:05")),
 	}
+}
+
+func telegramRateLimitAlertText(event proxy.UpstreamRateLimitEvent) string {
+	account := event.AccountName
+	if account == "" {
+		account = "unknown"
+	}
+	accountID := event.AccountID
+	if accountID == "" {
+		accountID = "unknown"
+	}
+	message := strings.TrimSpace(event.Message)
+	if message == "" {
+		message = "upstream rate limit"
+	}
+	if len(message) > 300 {
+		message = message[:300] + "..."
+	}
+	return strings.Join([]string{
+		"⛔ <b>账号额度可能已用尽</b>",
+		"",
+		"👤 <b>账号</b>",
+		"• 名称：" + tgEscape(account),
+		"• Account ID：" + tgEscape(accountID),
+		"",
+		"📡 <b>上游响应</b>",
+		fmt.Sprintf("• 状态码：%d", event.Status),
+		"• 类型：rate_limit_error",
+		"• 摘要：" + tgEscape(message),
+		"",
+		"🧯 <b>处理</b>",
+		"• 当前请求已按原样返回客户端",
+		fmt.Sprintf("• 通知冷却：%s", formatDuration(int(telegramAlertCooldown.Seconds()))),
+	}, "\n")
 }
 
 func telegramUsageText() string {

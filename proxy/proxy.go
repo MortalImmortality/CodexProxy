@@ -27,6 +27,8 @@ const (
 	defaultMaxRequestBodySize = 100 << 20 // 100 MiB
 	maxRetries                = 2
 	maxSSEEventSize           = 32 << 20 // 32 MiB
+	upstreamAccountHeader     = "X-Codex-Proxy-Upstream-Account"
+	upstreamAccountIDHeader   = "X-Codex-Proxy-Upstream-Account-ID"
 )
 
 var (
@@ -53,7 +55,23 @@ var (
 	}
 
 	startTime = time.Now()
+
+	rateLimitNotifierMu sync.RWMutex
+	rateLimitNotifier   func(context.Context, UpstreamRateLimitEvent)
 )
+
+type UpstreamRateLimitEvent struct {
+	AccountName string
+	AccountID   string
+	Status      int
+	Message     string
+}
+
+func SetRateLimitNotifier(fn func(context.Context, UpstreamRateLimitEvent)) {
+	rateLimitNotifierMu.Lock()
+	defer rateLimitNotifierMu.Unlock()
+	rateLimitNotifier = fn
+}
 
 func SetMaxRequestBodySize(size int64) {
 	if size > 0 {
@@ -331,6 +349,7 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 				}
 				continue
 			}
+			tagUpstreamAccount(resp, handle)
 			return resp, nil
 
 		default:
@@ -339,6 +358,34 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 	}
 
 	return resp, nil
+}
+
+func tagUpstreamAccount(resp *http.Response, handle *auth.TokenHandle) {
+	if resp == nil || handle == nil {
+		return
+	}
+	resp.Header.Set(upstreamAccountHeader, handle.Manager.Name())
+	if handle.AccountID != "" {
+		resp.Header.Set(upstreamAccountIDHeader, handle.AccountID)
+	}
+}
+
+func notifyUpstreamRateLimit(ctx context.Context, resp *http.Response, message string) {
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		return
+	}
+	rateLimitNotifierMu.RLock()
+	notifier := rateLimitNotifier
+	rateLimitNotifierMu.RUnlock()
+	if notifier == nil {
+		return
+	}
+	notifier(ctx, UpstreamRateLimitEvent{
+		AccountName: resp.Header.Get(upstreamAccountHeader),
+		AccountID:   resp.Header.Get(upstreamAccountIDHeader),
+		Status:      resp.StatusCode,
+		Message:     message,
+	})
 }
 
 // newUUID returns a random RFC-4122 v4 UUID string for the session_id header.
@@ -421,10 +468,12 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
+		message := upstreamErrorMessage(respBody)
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
-		recordError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
+		recordError(resp.StatusCode, "upstream_error", message)
+		notifyUpstreamRateLimit(r.Context(), resp, message)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 		return
@@ -496,10 +545,12 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
+		message := upstreamErrorMessage(respBody)
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
-		writeAnthropicError(w, resp.StatusCode, anthropicErrorType(resp.StatusCode), upstreamErrorMessage(respBody))
+		notifyUpstreamRateLimit(r.Context(), resp, message)
+		writeAnthropicError(w, resp.StatusCode, anthropicErrorType(resp.StatusCode), message)
 		return
 	}
 
@@ -1647,6 +1698,7 @@ func generateImagesOnce(ctx context.Context, codexReq map[string]interface{}) ([
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
+		notifyUpstreamRateLimit(ctx, resp, upstreamErrorMessage(respBody))
 		return nil, resp.StatusCode, respBody, nil
 	}
 
@@ -1768,7 +1820,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		recordError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
+		message := upstreamErrorMessage(respBody)
+		recordError(resp.StatusCode, "upstream_error", message)
+		notifyUpstreamRateLimit(r.Context(), resp, message)
 		ct := resp.Header.Get("Content-Type")
 		if ct != "" {
 			w.Header().Set("Content-Type", ct)

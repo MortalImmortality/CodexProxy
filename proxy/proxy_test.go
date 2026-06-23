@@ -870,6 +870,60 @@ func TestCallUpstreamFallsBackToAnotherAccountWhenRefreshFails(t *testing.T) {
 	}
 }
 
+func TestNotifyUpstreamRateLimitIncludesAccount(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "auth-a.json")
+	writeTestAuthFile(t, authFile, "token-a", "refresh-a", "acct-a")
+
+	oldPool := auth.Pool
+	oldNormalClient := normalClient
+	oldStreamClient := streamClient
+	t.Cleanup(func() {
+		auth.Pool = oldPool
+		normalClient = oldNormalClient
+		streamClient = oldStreamClient
+		SetRateLimitNotifier(nil)
+	})
+	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{{Name: "a", AuthFile: authFile}}, "round-robin")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"usage limit reached"}}`))
+	}))
+	defer upstream.Close()
+	normalClient = upstream.Client()
+	streamClient = upstream.Client()
+
+	events := make(chan UpstreamRateLimitEvent, 1)
+	SetRateLimitNotifier(func(ctx context.Context, event UpstreamRateLimitEvent) {
+		events <- event
+	})
+
+	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
+	if err != nil {
+		t.Fatalf("callUpstream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	notifyUpstreamRateLimit(context.Background(), resp, upstreamErrorMessage(respBody))
+
+	select {
+	case event := <-events:
+		if event.AccountName != "a" || event.AccountID != "acct-a" || event.Status != http.StatusTooManyRequests {
+			t.Fatalf("event = %#v", event)
+		}
+		if event.Message != "usage limit reached" {
+			t.Fatalf("message = %q", event.Message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rate limit event")
+	}
+}
+
 func writeTestAuthFile(t *testing.T, path, accessToken, refreshToken, accountID string) {
 	t.Helper()
 	authFile := auth.AuthFile{

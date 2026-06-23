@@ -91,6 +91,14 @@ func TestTelegramMessageFormatting(t *testing.T) {
 	if got := telegramServiceErrorText(assertErr("bad <err>")); !strings.Contains(got, "bad &lt;err&gt;") {
 		t.Fatalf("service error text = %q", got)
 	}
+	if got := telegramRateLimitAlertText(proxy.UpstreamRateLimitEvent{
+		AccountName: "acct <name>",
+		AccountID:   "acct_<id>",
+		Status:      http.StatusTooManyRequests,
+		Message:     "usage <limit> reached",
+	}); !strings.Contains(got, "⛔ <b>账号额度可能已用尽</b>") || !strings.Contains(got, "acct &lt;name&gt;") || !strings.Contains(got, "acct_&lt;id&gt;") || !strings.Contains(got, "usage &lt;limit&gt; reached") {
+		t.Fatalf("rate limit alert text = %q", got)
+	}
 	if got := telegramDoctorTextFromChecks([]doctorCheck{
 		{Name: "Auth <file>", OK: true, Detail: "ok"},
 		{Name: "Caddy", OK: false, Detail: "missing <conf>"},

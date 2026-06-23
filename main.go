@@ -81,6 +81,11 @@ func main() {
 		validateKey := proxy.KeyValidator(ks.ValidKey)
 
 		telegram := startTelegramMonitor(ctx)
+		if telegram != nil {
+			proxy.SetRateLimitNotifier(telegram.sendRateLimitAlert)
+		} else {
+			proxy.SetRateLimitNotifier(nil)
+		}
 
 		if err := proxy.Serve(ctx, host, port, validateKey); err != nil {
 			telegram.sendServiceError(err)
