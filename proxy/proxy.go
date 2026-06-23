@@ -144,7 +144,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 		models = nil
 	}
 
-	// baseModel for image requests is models[0] (a real chat model). If
+	// baseModel for image requests is the first discovered chat model. If
 	// discovery failed it stays empty and the image handlers reject requests
 	// rather than guessing a model name.
 	baseModel := ""
@@ -393,6 +393,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	clientWantsStream, _ := chatReq["stream"].(bool)
 	model, _ := chatReq["model"].(string)
+	if isImageOnlyModel(model) {
+		writeError(w, 400, "unsupported_model", fmt.Sprintf("%s is an image-only model; use /v1/images/generations or /v1/images/edits instead of /v1/chat/completions", model))
+		return
+	}
 	includeUsage := false
 	if so, ok := chatReq["stream_options"].(map[string]interface{}); ok {
 		includeUsage, _ = so["include_usage"].(bool)
@@ -1814,6 +1818,15 @@ func makeModelsHandler(models []string) http.HandlerFunc {
 	}
 }
 
+func isImageOnlyModel(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "gpt-image-1", "gpt-image-2":
+		return true
+	default:
+		return false
+	}
+}
+
 // ──────────────────────────────────────────────
 // SSE streaming: Codex format → OpenAI chat completion chunks
 // ──────────────────────────────────────────────
@@ -2488,7 +2501,8 @@ func anthropicErrorType(status int) string {
 
 func upstreamErrorMessage(body []byte) string {
 	var parsed struct {
-		Error interface{} `json:"error"`
+		Error  interface{} `json:"error"`
+		Detail string      `json:"detail"`
 	}
 	if json.Unmarshal(body, &parsed) == nil {
 		switch e := parsed.Error.(type) {
@@ -2500,6 +2514,9 @@ func upstreamErrorMessage(body []byte) string {
 			if msg, _ := e["message"].(string); msg != "" {
 				return msg
 			}
+		}
+		if parsed.Detail != "" {
+			return parsed.Detail
 		}
 	}
 	msg := strings.TrimSpace(string(body))

@@ -120,6 +120,31 @@ func TestWriteErrorIncrementsMetricsWithDetails(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRejectsImageOnlyModel(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"model": "gpt-image-2",
+		"messages": [{"role": "user", "content": "draw a square"}]
+	}`))
+	w := httptest.NewRecorder()
+
+	handleChatCompletions(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	errObj := got["error"].(map[string]interface{})
+	if errObj["type"] != "unsupported_model" {
+		t.Fatalf("error = %#v", errObj)
+	}
+	if !strings.Contains(errObj["message"].(string), "/v1/images/generations") {
+		t.Fatalf("message = %q, want images endpoint guidance", errObj["message"])
+	}
+}
+
 func TestAnthropicToChatRequest(t *testing.T) {
 	req := map[string]interface{}{
 		"model":  "claude-3-5-sonnet-latest",
@@ -411,6 +436,10 @@ func TestAnthropicErrorHelpers(t *testing.T) {
 	body := []byte(`{"error":{"message":"bad upstream"}}`)
 	if got := upstreamErrorMessage(body); got != "bad upstream" {
 		t.Fatalf("upstreamErrorMessage = %q", got)
+	}
+	body = []byte(`{"detail":"unsupported upstream model"}`)
+	if got := upstreamErrorMessage(body); got != "unsupported upstream model" {
+		t.Fatalf("upstreamErrorMessage detail = %q", got)
 	}
 }
 
