@@ -72,6 +72,36 @@ func TestConvertToOpenAIFormat(t *testing.T) {
 	}
 }
 
+func TestSnapshotMetricsIncludesLastError(t *testing.T) {
+	recordLastError(http.StatusBadGateway, "upstream_error", "bad <upstream>")
+
+	snapshot := SnapshotMetrics()
+	if snapshot.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if snapshot.LastError.Status != http.StatusBadGateway {
+		t.Fatalf("LastError.Status = %d, want %d", snapshot.LastError.Status, http.StatusBadGateway)
+	}
+	if snapshot.LastError.Type != "upstream_error" || snapshot.LastError.Message != "bad <upstream>" {
+		t.Fatalf("LastError = %#v", snapshot.LastError)
+	}
+}
+
+func TestUntrackedErrorDoesNotOverwriteLastError(t *testing.T) {
+	recordLastError(http.StatusBadGateway, "upstream_error", "counted failure")
+
+	w := httptest.NewRecorder()
+	writeUntrackedError(w, http.StatusUnauthorized, "unauthorized", "invalid key")
+
+	snapshot := SnapshotMetrics()
+	if snapshot.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if snapshot.LastError.Status != http.StatusBadGateway || snapshot.LastError.Message != "counted failure" {
+		t.Fatalf("LastError = %#v", snapshot.LastError)
+	}
+}
+
 func TestAnthropicToChatRequest(t *testing.T) {
 	req := map[string]interface{}{
 		"model":  "claude-3-5-sonnet-latest",

@@ -183,11 +183,13 @@ func (b *telegramBot) checkAlerts(now time.Time) []string {
 
 	current := proxy.SnapshotMetrics()
 	if delta := current.ErrorsTotal - b.alertState.metrics.ErrorsTotal; delta > 0 && b.shouldSendAlert("errors", now) {
-		alerts = append(alerts, telegramMetricAlertText("🔴", "服务错误增加", []string{
+		rows := []string{
 			fmt.Sprintf("• 新增错误：%d", delta),
 			fmt.Sprintf("• 错误总数：%d", current.ErrorsTotal),
 			fmt.Sprintf("• 请求总数：%d", current.RequestsTotal),
-		}))
+		}
+		rows = append(rows, telegramLastErrorRows(current.LastError)...)
+		alerts = append(alerts, telegramMetricAlertText("🔴", "服务错误增加", rows))
 	}
 	if delta := current.Retries - b.alertState.metrics.Retries; delta > 0 && b.shouldSendAlert("retries", now) {
 		alerts = append(alerts, telegramMetricAlertText("🧯", "上游重试增加", []string{
@@ -366,21 +368,40 @@ func telegramStatusText() string {
 
 func telegramMetricsText() string {
 	m := proxy.SnapshotMetrics()
-	return fmt.Sprintf(strings.Join([]string{
+	rows := []string{
 		"📈 <b>运行指标</b>",
 		"",
 		"🔁 <b>请求</b>",
-		"• 总数：%d",
-		"• 活跃：%d",
-		"• 错误：%d",
+		fmt.Sprintf("• 总数：%d", m.RequestsTotal),
+		fmt.Sprintf("• 活跃：%d", m.RequestsActive),
+		fmt.Sprintf("• 错误：%d", m.ErrorsTotal),
 		"",
 		"🧯 <b>重试</b>",
-		"• 上游重试：%d",
-		"• Token refresh：%d",
+		fmt.Sprintf("• 上游重试：%d", m.Retries),
+		fmt.Sprintf("• Token refresh：%d", m.TokenRefreshes),
+	}
+	if m.LastError != nil {
+		rows = append(rows, "", "🧾 <b>最近错误</b>")
+		rows = append(rows, telegramLastErrorRows(m.LastError)...)
+	}
+	rows = append(rows,
 		"",
 		"⏳ <b>Uptime</b>",
-		"• %s",
-	}, "\n"), m.RequestsTotal, m.RequestsActive, m.ErrorsTotal, m.Retries, m.TokenRefreshes, formatDuration(m.UptimeSeconds))
+		"• "+formatDuration(m.UptimeSeconds),
+	)
+	return strings.Join(rows, "\n")
+}
+
+func telegramLastErrorRows(err *proxy.ErrorDetail) []string {
+	if err == nil {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("• 状态码：%d", err.Status),
+		"• 类型：" + tgEscape(err.Type),
+		"• 消息：" + tgEscape(err.Message),
+		"• 时间：" + tgEscape(err.Time.Format("2006-01-02 15:04:05")),
+	}
 }
 
 func telegramUsageText() string {

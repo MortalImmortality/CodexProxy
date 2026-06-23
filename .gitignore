@@ -4,3 +4,4 @@ codex-proxy-*
 auth.json
 auth-*.json
 proxy.json
+.codegraph/

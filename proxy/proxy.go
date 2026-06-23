@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -86,19 +87,29 @@ var stats struct {
 	errorsTotal    atomic.Int64
 	retries        atomic.Int64
 	tokenRefreshes atomic.Int64
+	lastErrorMu    sync.Mutex
+	lastError      *ErrorDetail
+}
+
+type ErrorDetail struct {
+	Time    time.Time `json:"time"`
+	Status  int       `json:"status"`
+	Type    string    `json:"type"`
+	Message string    `json:"message"`
 }
 
 type MetricsSnapshot struct {
-	RequestsTotal  int64 `json:"requests_total"`
-	RequestsActive int64 `json:"requests_active"`
-	ErrorsTotal    int64 `json:"errors_total"`
-	Retries        int64 `json:"retries"`
-	TokenRefreshes int64 `json:"token_refreshes"`
-	UptimeSeconds  int   `json:"uptime_seconds"`
+	RequestsTotal  int64        `json:"requests_total"`
+	RequestsActive int64        `json:"requests_active"`
+	ErrorsTotal    int64        `json:"errors_total"`
+	Retries        int64        `json:"retries"`
+	TokenRefreshes int64        `json:"token_refreshes"`
+	UptimeSeconds  int          `json:"uptime_seconds"`
+	LastError      *ErrorDetail `json:"last_error,omitempty"`
 }
 
 func SnapshotMetrics() MetricsSnapshot {
-	return MetricsSnapshot{
+	snapshot := MetricsSnapshot{
 		RequestsTotal:  stats.requestsTotal.Load(),
 		RequestsActive: stats.requestsActive.Load(),
 		ErrorsTotal:    stats.errorsTotal.Load(),
@@ -106,6 +117,13 @@ func SnapshotMetrics() MetricsSnapshot {
 		TokenRefreshes: stats.tokenRefreshes.Load(),
 		UptimeSeconds:  int(time.Since(startTime).Seconds()),
 	}
+	stats.lastErrorMu.Lock()
+	if stats.lastError != nil {
+		last := *stats.lastError
+		snapshot.LastError = &last
+	}
+	stats.lastErrorMu.Unlock()
+	return snapshot
 }
 
 // ──────────────────────────────────────────────
@@ -353,7 +371,7 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, 405, "method_not_allowed", "POST only")
+		writeUntrackedError(w, 405, "method_not_allowed", "POST only")
 		return
 	}
 
@@ -407,6 +425,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
+		recordLastError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 		return
@@ -438,7 +457,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeAnthropicError(w, 405, "method_not_allowed", "POST only")
+		writeUntrackedAnthropicError(w, 405, "method_not_allowed", "POST only")
 		return
 	}
 
@@ -945,7 +964,7 @@ func anthropicStopReason(finishReason string) string {
 func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, 500, "internal", "streaming not supported")
+		writeUntrackedError(w, 500, "internal", "streaming not supported")
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1428,12 +1447,12 @@ func extractImageRefs(raw map[string]interface{}) []string {
 
 func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdit bool) {
 	if r.Method != http.MethodPost {
-		writeError(w, 405, "method_not_allowed", "POST only")
+		writeUntrackedError(w, 405, "method_not_allowed", "POST only")
 		return
 	}
 
 	if baseModel == "" {
-		writeError(w, 503, "model_unavailable", "model discovery failed at startup; image generation unavailable")
+		writeUntrackedError(w, 503, "model_unavailable", "model discovery failed at startup; image generation unavailable")
 		return
 	}
 
@@ -1598,6 +1617,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 			slog.Error("upstream image error",
 				"status", status,
 				"body", string(respBody[:min(500, len(respBody))]))
+			recordLastError(status, "upstream_error", upstreamErrorMessage(respBody))
 			w.WriteHeader(status)
 			w.Write(respBody)
 			return
@@ -1728,7 +1748,7 @@ func parseImageSSE(body io.Reader) ([]imageResult, error) {
 
 func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, 405, "method_not_allowed", "POST only")
+		writeUntrackedError(w, 405, "method_not_allowed", "POST only")
 		return
 	}
 
@@ -1770,12 +1790,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode != 200 {
 		stats.errorsTotal.Add(1)
+		respBody, _ := io.ReadAll(resp.Body)
+		recordLastError(resp.StatusCode, "upstream_error", upstreamErrorMessage(respBody))
 		ct := resp.Header.Get("Content-Type")
 		if ct != "" {
 			w.Header().Set("Content-Type", ct)
 		}
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		w.Write(respBody)
 		return
 	}
 
@@ -1828,7 +1850,7 @@ func makeModelsHandler(models []string) http.HandlerFunc {
 func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model string, includeUsage bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, 500, "internal", "streaming not supported")
+		writeUntrackedError(w, 500, "internal", "streaming not supported")
 		return
 	}
 
@@ -2111,7 +2133,7 @@ func buildToolCallDeltaChunk(id, model string, created int64, index int, args st
 func streamPassthrough(w http.ResponseWriter, resp *http.Response) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, 500, "internal", "streaming not supported")
+		writeUntrackedError(w, 500, "internal", "streaming not supported")
 		return
 	}
 
@@ -2359,10 +2381,10 @@ func withAuth(validateKey KeyValidator, next http.Handler) http.Handler {
 
 		if !validateKey(key) {
 			if r.URL.Path == "/v1/messages" {
-				writeAnthropicError(w, 401, "authentication_error", "invalid or missing API key")
+				writeUntrackedAnthropicError(w, 401, "authentication_error", "invalid or missing API key")
 				return
 			}
-			writeError(w, 401, "unauthorized", "invalid or missing API key")
+			writeUntrackedError(w, 401, "unauthorized", "invalid or missing API key")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -2418,6 +2440,15 @@ func (lw *logWriter) Flush() {
 // ──────────────────────────────────────────────
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	recordLastError(status, code, message)
+	writeErrorBody(w, status, code, message)
+}
+
+func writeUntrackedError(w http.ResponseWriter, status int, code, message string) {
+	writeErrorBody(w, status, code, message)
+}
+
+func writeErrorBody(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2432,6 +2463,18 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, message str
 	if errType == "" {
 		errType = anthropicErrorType(status)
 	}
+	recordLastError(status, errType, message)
+	writeAnthropicErrorBody(w, status, errType, message)
+}
+
+func writeUntrackedAnthropicError(w http.ResponseWriter, status int, errType, message string) {
+	if errType == "" {
+		errType = anthropicErrorType(status)
+	}
+	writeAnthropicErrorBody(w, status, errType, message)
+}
+
+func writeAnthropicErrorBody(w http.ResponseWriter, status int, errType, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2441,6 +2484,17 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, message str
 			"message": message,
 		},
 	})
+}
+
+func recordLastError(status int, errType, message string) {
+	stats.lastErrorMu.Lock()
+	stats.lastError = &ErrorDetail{
+		Time:    time.Now(),
+		Status:  status,
+		Type:    errType,
+		Message: message,
+	}
+	stats.lastErrorMu.Unlock()
 }
 
 func anthropicErrorType(status int) string {

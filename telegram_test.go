@@ -73,6 +73,15 @@ func TestTelegramMessageFormatting(t *testing.T) {
 	if got := telegramMetricsText(); !strings.Contains(got, "📈 <b>运行指标</b>") || !strings.Contains(got, "⏳ <b>Uptime</b>") {
 		t.Fatalf("metrics text = %q", got)
 	}
+	lastErrorRows := telegramLastErrorRows(&proxy.ErrorDetail{
+		Time:    time.Date(2026, 6, 23, 12, 30, 0, 0, time.UTC),
+		Status:  http.StatusBadGateway,
+		Type:    "upstream_error",
+		Message: "bad <upstream>",
+	})
+	if got := strings.Join(lastErrorRows, "\n"); !strings.Contains(got, "状态码：502") || !strings.Contains(got, "bad &lt;upstream&gt;") {
+		t.Fatalf("last error rows = %q", got)
+	}
 	if got := tgEscape("a<b&c"); got != "a&lt;b&amp;c" {
 		t.Fatalf("tgEscape = %q", got)
 	}
