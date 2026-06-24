@@ -447,22 +447,28 @@ func telegramRateLimitAlertText(event proxy.UpstreamRateLimitEvent) string {
 	if len(message) > 300 {
 		message = message[:300] + "..."
 	}
-	return strings.Join([]string{
+	lines := []string{
 		"⛔ <b>账号额度可能已用尽</b>",
 		"",
 		"👤 <b>账号</b>",
 		"• 名称：" + tgEscape(account),
 		"• Account ID：" + tgEscape(accountID),
+	}
+	if !event.ResetAt.IsZero() {
+		lines = append(lines, "• 预计恢复："+tgEscape(event.ResetAt.Local().Format("2006-01-02 15:04:05 MST")))
+	}
+	lines = append(lines,
 		"",
 		"📡 <b>上游响应</b>",
 		fmt.Sprintf("• 状态码：%d", event.Status),
 		"• 类型：rate_limit_error",
-		"• 摘要：" + tgEscape(message),
+		"• 摘要："+tgEscape(message),
 		"",
 		"🧯 <b>处理</b>",
 		"• 当前请求已按原样返回客户端",
 		fmt.Sprintf("• 通知冷却：%s", formatDuration(int(telegramAlertCooldown.Seconds()))),
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func telegramUsageText() string {
@@ -499,6 +505,9 @@ func telegramUsageText() string {
 		lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(label)))
 		lines = append(lines, fmt.Sprintf("• 状态：%s", status))
 		lines = append(lines, fmt.Sprintf("• 计划：%s", tgEscape(info.PlanType)))
+		if until := tm.FailedUntil(); !until.IsZero() && time.Now().Before(until) {
+			lines = append(lines, "• 预计恢复："+tgEscape(until.Local().Format("2006-01-02 15:04:05 MST")))
+		}
 		if len(info.Windows) == 0 {
 			lines = append(lines, "• 无 rate limit 窗口")
 		}

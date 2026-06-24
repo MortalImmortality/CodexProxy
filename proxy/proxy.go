@@ -29,6 +29,7 @@ const (
 	maxSSEEventSize           = 32 << 20 // 32 MiB
 	upstreamAccountHeader     = "X-Codex-Proxy-Upstream-Account"
 	upstreamAccountIDHeader   = "X-Codex-Proxy-Upstream-Account-ID"
+	upstreamResetAtHeader     = "X-Codex-Proxy-Upstream-Reset-At"
 )
 
 var (
@@ -65,6 +66,7 @@ type UpstreamRateLimitEvent struct {
 	AccountID   string
 	Status      int
 	Message     string
+	ResetAt     time.Time
 }
 
 func SetRateLimitNotifier(fn func(context.Context, UpstreamRateLimitEvent)) {
@@ -289,10 +291,12 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 
 	accountID := handle.AccountID
 	sessionID := newUUID()
-	refreshed := false
+	refreshedAccounts := make(map[*auth.TokenManager]bool)
+	rateLimitedAccounts := make(map[*auth.TokenManager]bool)
 	var resp *http.Response
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	serverErrorRetries := 0
+	for {
 		req, _ := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -313,8 +317,9 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 		}
 
 		switch {
-		case resp.StatusCode == 401 && !refreshed:
+		case resp.StatusCode == 401 && !refreshedAccounts[handle.Manager]:
 			resp.Body.Close()
+			refreshManager := handle.Manager
 			slog.Warn("upstream 401, refreshing token",
 				"account", handle.Manager.Name())
 			stats.tokenRefreshes.Add(1)
@@ -329,18 +334,54 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 				accountID = handle.AccountID
 			}
 			accountID = handle.AccountID
-			refreshed = true
+			refreshedAccounts[refreshManager] = true
 			stats.retries.Add(1)
 			continue
 
-		case resp.StatusCode == 429 || resp.StatusCode >= 500:
-			if attempt < maxRetries {
-				delay := retryDelay(resp, attempt)
+		case resp.StatusCode == 429:
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			message := upstreamErrorMessage(respBody)
+			resetAt, resetSource := rateLimitResetAt(ctx, resp, handle)
+			handle.Manager.MarkFailedUntil(fmt.Errorf("upstream rate limited: %s", message), resetAt)
+			rateLimitedAccounts[handle.Manager] = true
+
+			if len(rateLimitedAccounts) >= len(auth.Pool.Managers()) {
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+				tagUpstreamAccount(resp, handle)
+				tagUpstreamReset(resp, resetAt)
+				return resp, nil
+			}
+
+			nextHandle, err := acquireUntriedAccount(rateLimitedAccounts)
+			if err != nil {
+				resp.Body = io.NopCloser(bytes.NewReader(respBody))
+				tagUpstreamAccount(resp, handle)
+				tagUpstreamReset(resp, resetAt)
+				return resp, nil
+			}
+
+			slog.Warn("upstream rate limited, trying another account",
+				"account", handle.Manager.Name(),
+				"next_account", nextHandle.Manager.Name(),
+				"message", message,
+				"reset_at", resetAt,
+				"reset_source", resetSource)
+			handle = nextHandle
+			token = handle.Token
+			accountID = handle.AccountID
+			stats.retries.Add(1)
+			continue
+
+		case resp.StatusCode >= 500:
+			if serverErrorRetries < maxRetries {
+				delay := retryDelay(resp, serverErrorRetries)
 				slog.Warn("upstream error, retrying",
 					"status", resp.StatusCode,
-					"attempt", attempt+1,
+					"attempt", serverErrorRetries+1,
 					"delay", delay)
 				resp.Body.Close()
+				serverErrorRetries++
 				stats.retries.Add(1)
 				select {
 				case <-ctx.Done():
@@ -356,8 +397,20 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 			return resp, nil
 		}
 	}
+}
 
-	return resp, nil
+func acquireUntriedAccount(tried map[*auth.TokenManager]bool) (*auth.TokenHandle, error) {
+	managers := auth.Pool.Managers()
+	for range managers {
+		handle, err := auth.Pool.Acquire()
+		if err != nil {
+			return nil, err
+		}
+		if !tried[handle.Manager] {
+			return handle, nil
+		}
+	}
+	return nil, fmt.Errorf("no untried accounts available")
 }
 
 func tagUpstreamAccount(resp *http.Response, handle *auth.TokenHandle) {
@@ -370,6 +423,13 @@ func tagUpstreamAccount(resp *http.Response, handle *auth.TokenHandle) {
 	}
 }
 
+func tagUpstreamReset(resp *http.Response, resetAt time.Time) {
+	if resp == nil || resetAt.IsZero() {
+		return
+	}
+	resp.Header.Set(upstreamResetAtHeader, resetAt.UTC().Format(time.RFC3339))
+}
+
 func notifyUpstreamRateLimit(ctx context.Context, resp *http.Response, message string) {
 	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
 		return
@@ -380,11 +440,16 @@ func notifyUpstreamRateLimit(ctx context.Context, resp *http.Response, message s
 	if notifier == nil {
 		return
 	}
+	var resetAt time.Time
+	if value := resp.Header.Get(upstreamResetAtHeader); value != "" {
+		resetAt, _ = time.Parse(time.RFC3339, value)
+	}
 	notifier(ctx, UpstreamRateLimitEvent{
 		AccountName: resp.Header.Get(upstreamAccountHeader),
 		AccountID:   resp.Header.Get(upstreamAccountIDHeader),
 		Status:      resp.StatusCode,
 		Message:     message,
+		ResetAt:     resetAt,
 	})
 }
 
@@ -410,6 +475,69 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 		}
 	}
 	return time.Duration(1<<attempt) * time.Second
+}
+
+func rateLimitResetAt(ctx context.Context, resp *http.Response, handle *auth.TokenHandle) (time.Time, string) {
+	now := time.Now()
+	if until, ok := parseRetryAfterUntil(resp.Header.Get("Retry-After"), now); ok {
+		return until, "retry-after"
+	}
+
+	if handle != nil && handle.Token != "" {
+		usageCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		if info, err := auth.QueryUsageContext(usageCtx, handle.Token); err == nil {
+			if resetSecs, ok := usageResetSeconds(info); ok {
+				return now.Add(time.Duration(resetSecs) * time.Second), "usage"
+			}
+		} else {
+			slog.Warn("usage query after rate limit failed",
+				"account", handle.Manager.Name(),
+				"error", err)
+		}
+	}
+
+	return now.Add(5 * time.Minute), "fallback"
+}
+
+func parseRetryAfterUntil(value string, now time.Time) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if secs, err := strconv.Atoi(value); err == nil {
+		if secs < 0 {
+			return time.Time{}, false
+		}
+		return now.Add(time.Duration(secs) * time.Second), true
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+func usageResetSeconds(info *auth.UsageInfo) (int, bool) {
+	if info == nil || !info.LimitHit {
+		return 0, false
+	}
+
+	resetSecs := 0
+	for _, window := range info.Windows {
+		if window.UsedPercent >= 100 && window.ResetSecs > resetSecs {
+			resetSecs = window.ResetSecs
+		}
+	}
+	if resetSecs > 0 {
+		return resetSecs, true
+	}
+
+	for _, window := range info.Windows {
+		if window.ResetSecs > resetSecs {
+			resetSecs = window.ResetSecs
+		}
+	}
+	return resetSecs, resetSecs > 0
 }
 
 // ──────────────────────────────────────────────
@@ -2391,6 +2519,9 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 			"allowed":       info.Allowed,
 			"limit_reached": info.LimitHit,
 			"windows":       info.Windows,
+		}
+		if until := tm.FailedUntil(); !until.IsZero() && time.Now().Before(until) {
+			entry["available_at"] = until.UTC().Format(time.RFC3339)
 		}
 		results = append(results, entry)
 	}

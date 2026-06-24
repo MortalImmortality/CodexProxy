@@ -393,4 +393,18 @@ func TestTokenManagerFailTracking(t *testing.T) {
 	if tm.IsFailed() {
 		t.Error("should not be failed after ClearFailed")
 	}
+
+	until := time.Now().Add(time.Hour)
+	tm.MarkFailedUntil(fmt.Errorf("limited"), until)
+	if !tm.IsFailed() {
+		t.Error("should be failed before failedUntil")
+	}
+	if got := tm.FailedUntil(); !got.Equal(until) {
+		t.Fatalf("FailedUntil = %s, want %s", got, until)
+	}
+
+	tm.MarkFailedUntil(fmt.Errorf("expired"), time.Now().Add(-time.Second))
+	if tm.IsFailed() {
+		t.Error("should not be failed after failedUntil")
+	}
 }

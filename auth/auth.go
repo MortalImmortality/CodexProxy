@@ -100,9 +100,10 @@ type TokenManager struct {
 	name     string
 	cancel   context.CancelFunc
 
-	failMu    sync.RWMutex
-	lastError error
-	failedAt  time.Time
+	failMu      sync.RWMutex
+	lastError   error
+	failedAt    time.Time
+	failedUntil time.Time
 }
 
 var Manager *TokenManager
@@ -125,11 +126,16 @@ func (tm *TokenManager) Name() string     { return tm.name }
 func (tm *TokenManager) FilePath() string { return tm.filePath }
 
 func (tm *TokenManager) MarkFailed(err error) {
+	tm.MarkFailedUntil(err, time.Now().Add(5*time.Minute))
+}
+
+func (tm *TokenManager) MarkFailedUntil(err error, until time.Time) {
 	tm.failMu.Lock()
 	defer tm.failMu.Unlock()
 	tm.lastError = err
 	tm.failedAt = time.Now()
-	slog.Warn("account marked failed", "account", tm.name, "error", err)
+	tm.failedUntil = until
+	slog.Warn("account marked failed", "account", tm.name, "error", err, "until", until)
 }
 
 func (tm *TokenManager) ClearFailed() {
@@ -137,6 +143,7 @@ func (tm *TokenManager) ClearFailed() {
 	defer tm.failMu.Unlock()
 	tm.lastError = nil
 	tm.failedAt = time.Time{}
+	tm.failedUntil = time.Time{}
 }
 
 func (tm *TokenManager) IsFailed() bool {
@@ -145,8 +152,16 @@ func (tm *TokenManager) IsFailed() bool {
 	if tm.lastError == nil {
 		return false
 	}
-	// Auto-clear after 5 minutes
-	return time.Since(tm.failedAt) <= 5*time.Minute
+	if tm.failedUntil.IsZero() {
+		return time.Since(tm.failedAt) <= 5*time.Minute
+	}
+	return time.Now().Before(tm.failedUntil)
+}
+
+func (tm *TokenManager) FailedUntil() time.Time {
+	tm.failMu.RLock()
+	defer tm.failMu.RUnlock()
+	return tm.failedUntil
 }
 
 func DefaultAuthPath() string {
@@ -662,7 +677,11 @@ func windowLabel(windowSecs int, fallback string) string {
 }
 
 func QueryUsage(accessToken string) (*UsageInfo, error) {
-	req, _ := http.NewRequest("GET", UsageURL, nil)
+	return QueryUsageContext(context.Background(), accessToken)
+}
+
+func QueryUsageContext(ctx context.Context, accessToken string) (*UsageInfo, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", UsageURL, nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("User-Agent", "codex-proxy/1.0")
 

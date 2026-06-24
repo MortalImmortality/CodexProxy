@@ -177,6 +177,9 @@ func (p *TokenPool) StartBackgroundRefresh(ctx context.Context) {
 
 				for _, tm := range p.Managers() {
 					if tm.IsFailed() {
+						if until := tm.FailedUntil(); !until.IsZero() && time.Now().Before(until) {
+							continue
+						}
 						slog.Info("retrying failed account", "account", tm.name)
 						if _, err := tm.EnsureFreshToken(); err == nil {
 							tm.ClearFailed()

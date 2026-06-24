@@ -765,6 +765,53 @@ func TestCORSAllowsXAPIKey(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfterUntil(t *testing.T) {
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+
+	until, ok := parseRetryAfterUntil("90", now)
+	if !ok || !until.Equal(now.Add(90*time.Second)) {
+		t.Fatalf("numeric Retry-After = %s, %v", until, ok)
+	}
+
+	date := now.Add(2 * time.Minute).UTC().Format(http.TimeFormat)
+	until, ok = parseRetryAfterUntil(date, now)
+	if !ok || !until.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("date Retry-After = %s, %v", until, ok)
+	}
+
+	if _, ok := parseRetryAfterUntil("bad", now); ok {
+		t.Fatal("invalid Retry-After should not parse")
+	}
+}
+
+func TestUsageResetSeconds(t *testing.T) {
+	resetSecs, ok := usageResetSeconds(&auth.UsageInfo{
+		LimitHit: true,
+		Windows: []auth.UsageWindow{
+			{Name: "session", UsedPercent: 100, ResetSecs: 60},
+			{Name: "weekly", UsedPercent: 100, ResetSecs: 600},
+		},
+	})
+	if !ok || resetSecs != 600 {
+		t.Fatalf("resetSecs = %d, %v; want 600, true", resetSecs, ok)
+	}
+
+	resetSecs, ok = usageResetSeconds(&auth.UsageInfo{
+		LimitHit: true,
+		Windows: []auth.UsageWindow{
+			{Name: "session", UsedPercent: 80, ResetSecs: 60},
+			{Name: "weekly", UsedPercent: 90, ResetSecs: 600},
+		},
+	})
+	if !ok || resetSecs != 600 {
+		t.Fatalf("fallback resetSecs = %d, %v; want 600, true", resetSecs, ok)
+	}
+
+	if _, ok := usageResetSeconds(&auth.UsageInfo{LimitHit: false}); ok {
+		t.Fatal("non-limit-hit usage should not produce reset seconds")
+	}
+}
+
 func TestCallUpstreamRefreshesOn401AndRetriesWithAccountID(t *testing.T) {
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "auth-a.json")
@@ -882,6 +929,78 @@ func TestCallUpstreamFallsBackToAnotherAccountWhenRefreshFails(t *testing.T) {
 	}
 	if seen[1].authHeader != "Bearer token-b" || seen[1].accountID != "acct-b" {
 		t.Fatalf("fallback request = %#v, want account b", seen[1])
+	}
+}
+
+func TestCallUpstreamFallsBackToAnotherAccountOnRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	authFileA := filepath.Join(dir, "auth-a.json")
+	authFileB := filepath.Join(dir, "auth-b.json")
+	writeTestAuthFile(t, authFileA, "token-a", "refresh-a", "acct-a")
+	writeTestAuthFile(t, authFileB, "token-b", "refresh-b", "acct-b")
+
+	oldPool := auth.Pool
+	oldNormalClient := normalClient
+	oldStreamClient := streamClient
+	t.Cleanup(func() {
+		auth.Pool = oldPool
+		normalClient = oldNormalClient
+		streamClient = oldStreamClient
+	})
+	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{
+		{Name: "a", AuthFile: authFileA},
+		{Name: "b", AuthFile: authFileB},
+	}, "round-robin")
+
+	type seenRequest struct {
+		authHeader string
+		accountID  string
+	}
+	var seen []seenRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, seenRequest{
+			authHeader: r.Header.Get("Authorization"),
+			accountID:  r.Header.Get("chatgpt-account-id"),
+		})
+		if r.Header.Get("chatgpt-account-id") == "acct-a" {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"usage limit reached"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	normalClient = upstream.Client()
+	streamClient = upstream.Client()
+
+	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
+	if err != nil {
+		t.Fatalf("callUpstream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("upstream calls = %d, want 2: %#v", len(seen), seen)
+	}
+	if seen[0].authHeader != "Bearer token-a" || seen[0].accountID != "acct-a" {
+		t.Fatalf("first request = %#v, want account a", seen[0])
+	}
+	if seen[1].authHeader != "Bearer token-b" || seen[1].accountID != "acct-b" {
+		t.Fatalf("fallback request = %#v, want account b", seen[1])
+	}
+
+	managers := auth.Pool.Managers()
+	if len(managers) != 2 {
+		t.Fatalf("managers = %d, want 2", len(managers))
+	}
+	if until := managers[0].FailedUntil(); time.Until(until) < 100*time.Second {
+		t.Fatalf("account a failedUntil = %s, want about 120s in the future", until)
 	}
 }
 

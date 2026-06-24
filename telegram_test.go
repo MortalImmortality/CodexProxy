@@ -96,7 +96,8 @@ func TestTelegramMessageFormatting(t *testing.T) {
 		AccountID:   "acct_<id>",
 		Status:      http.StatusTooManyRequests,
 		Message:     "usage <limit> reached",
-	}); !strings.Contains(got, "⛔ <b>账号额度可能已用尽</b>") || !strings.Contains(got, "acct &lt;name&gt;") || !strings.Contains(got, "acct_&lt;id&gt;") || !strings.Contains(got, "usage &lt;limit&gt; reached") {
+		ResetAt:     time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
+	}); !strings.Contains(got, "⛔ <b>账号额度可能已用尽</b>") || !strings.Contains(got, "acct &lt;name&gt;") || !strings.Contains(got, "acct_&lt;id&gt;") || !strings.Contains(got, "usage &lt;limit&gt; reached") || !strings.Contains(got, "预计恢复") {
 		t.Fatalf("rate limit alert text = %q", got)
 	}
 	if got := telegramDoctorTextFromChecks([]doctorCheck{
