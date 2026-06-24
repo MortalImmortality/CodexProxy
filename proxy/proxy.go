@@ -440,6 +440,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	clientWantsStream, _ := chatReq["stream"].(bool)
 	model, _ := chatReq["model"].(string)
+	setRequestLogInfo(w, model, requestReasoningForLog(chatReq))
 	if isImageOnlyModel(model) {
 		writeError(w, 400, "unsupported_model", fmt.Sprintf("%s is an image-only model; use /v1/images/generations or /v1/images/edits instead of /v1/chat/completions", model))
 		return
@@ -526,6 +527,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	clientWantsStream, _ := anthropicReq["stream"].(bool)
 	clientModel, _ := anthropicReq["model"].(string)
 	chatReq := anthropicToChatRequest(anthropicReq)
+	upstreamModel, _ := chatReq["model"].(string)
+	setRequestLogInfo(w, upstreamModel, requestReasoningForLog(chatReq))
 
 	// Codex /responses emits SSE; aggregate for non-streaming Anthropic
 	// clients and translate to Anthropic SSE for streaming clients.
@@ -1799,6 +1802,8 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	isStreaming := false
 	if json.Unmarshal(body, &reqMap) == nil {
 		isStreaming, _ = reqMap["stream"].(bool)
+		model, _ := reqMap["model"].(string)
+		setRequestLogInfo(w, model, requestReasoningForLog(reqMap))
 	}
 
 	upstreamBody := body
@@ -2448,18 +2453,28 @@ func withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		lw := &logWriter{ResponseWriter: w, statusCode: 200}
 		next.ServeHTTP(lw, r)
-		slog.Info("request",
+		args := []interface{}{
 			"method", r.Method,
 			"path", r.URL.Path,
 			"remote", r.RemoteAddr,
 			"status", lw.statusCode,
-			"duration", time.Since(start).Round(time.Millisecond).String())
+			"duration", time.Since(start).Round(time.Millisecond).String(),
+		}
+		if lw.model != "" {
+			args = append(args, "model", lw.model)
+		}
+		if lw.reasoning != nil {
+			args = append(args, "reasoning", lw.reasoning)
+		}
+		slog.Info("request", args...)
 	})
 }
 
 type logWriter struct {
 	http.ResponseWriter
 	statusCode int
+	model      string
+	reasoning  interface{}
 }
 
 func (lw *logWriter) WriteHeader(code int) {
@@ -2467,10 +2482,59 @@ func (lw *logWriter) WriteHeader(code int) {
 	lw.ResponseWriter.WriteHeader(code)
 }
 
+func (lw *logWriter) SetRequestLogInfo(model string, reasoning interface{}) {
+	lw.model = model
+	lw.reasoning = reasoning
+}
+
 func (lw *logWriter) Flush() {
 	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+type requestLogInfoSetter interface {
+	SetRequestLogInfo(model string, reasoning interface{})
+}
+
+func setRequestLogInfo(w http.ResponseWriter, model string, reasoning interface{}) {
+	if setter, ok := w.(requestLogInfoSetter); ok {
+		setter.SetRequestLogInfo(model, reasoning)
+	}
+}
+
+func requestReasoningForLog(req map[string]interface{}) interface{} {
+	if reasoning, ok := req["reasoning"]; ok {
+		return compactReasoningForLog(reasoning)
+	}
+	if effort, ok := req["reasoning_effort"]; ok {
+		return map[string]interface{}{"effort": effort}
+	}
+	if effort, ok := req["effort"]; ok {
+		return map[string]interface{}{"effort": effort}
+	}
+	return nil
+}
+
+func compactReasoningForLog(reasoning interface{}) interface{} {
+	reasoningMap, ok := reasoning.(map[string]interface{})
+	if !ok {
+		return reasoning
+	}
+	out := make(map[string]interface{}, len(reasoningMap))
+	for k, v := range reasoningMap {
+		switch vv := v.(type) {
+		case string:
+			if len(vv) > 200 {
+				out[k] = vv[:200] + "...(truncated)"
+			} else {
+				out[k] = vv
+			}
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // ──────────────────────────────────────────────

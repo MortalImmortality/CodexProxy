@@ -120,6 +120,21 @@ func TestWriteErrorIncrementsMetricsWithDetails(t *testing.T) {
 	}
 }
 
+func TestRequestReasoningForLog(t *testing.T) {
+	got := requestReasoningForLog(map[string]interface{}{
+		"model":            "gpt-5",
+		"reasoning_effort": "high",
+	})
+
+	reasoning, ok := got.(map[string]interface{})
+	if !ok {
+		t.Fatalf("reasoning = %#v, want map", got)
+	}
+	if reasoning["effort"] != "high" {
+		t.Fatalf("effort = %v, want high", reasoning["effort"])
+	}
+}
+
 func TestChatCompletionsRejectsImageOnlyModel(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model": "gpt-image-2",
