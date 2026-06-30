@@ -1181,7 +1181,7 @@ func parseUsageResetBody(body []byte) *UsageResetResult {
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(body, &raw) != nil {
-		return &UsageResetResult{Outcome: "unknown", Message: strings.TrimSpace(string(body))}
+		return &UsageResetResult{Outcome: "reset", Message: strings.TrimSpace(string(body))}
 	}
 	outcome := raw.Outcome
 	if outcome == "" {
@@ -1191,7 +1191,7 @@ func parseUsageResetBody(body []byte) *UsageResetResult {
 		outcome = raw.Status
 	}
 	if outcome == "" {
-		outcome = "unknown"
+		outcome = "reset"
 	}
 	return &UsageResetResult{Outcome: outcome, Message: raw.Message}
 }

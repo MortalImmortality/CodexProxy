@@ -374,6 +374,26 @@ func TestResetUsageForManagerClearsFailedState(t *testing.T) {
 	}
 }
 
+func TestParseUsageResetBodyDefaultsToResetOnSuccessfulResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "empty json", body: []byte(`{}`)},
+		{name: "empty body", body: nil},
+		{name: "plain body", body: []byte(`ok`)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseUsageResetBody(tt.body)
+			if result.Outcome != "reset" {
+				t.Fatalf("Outcome = %q, want reset", result.Outcome)
+			}
+		})
+	}
+}
+
 func TestBuildCodexRequestBody_NonReasoningSamplingParams(t *testing.T) {
 	chatReq := map[string]interface{}{
 		"model":       "gpt-4.1",
