@@ -37,7 +37,12 @@ func main() {
 		}
 		authFile := loginOpts.authFile
 		auth.SetManagerPath(authFile)
-		if err := auth.Login(); err != nil {
+		if loginOpts.withAccessToken {
+			err = auth.LoginWithAccessToken(os.Stdin)
+		} else {
+			err = auth.Login()
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -98,8 +103,14 @@ func main() {
 
 	case "status":
 		cfg, err := ensureConfig(defaultConfigPath())
+		_, hasEnvAccessToken := envAccessTokenAccount(nil)
+		if acc, ok := envAccessTokenAccount(nil); ok {
+			fmt.Printf("  [%s] CODEX_ACCESS_TOKEN (env)\n", acc.Name)
+		}
 		if err != nil {
-			auth.ShowStatus()
+			if !hasEnvAccessToken {
+				auth.ShowStatus()
+			}
 		} else {
 			fmt.Printf("  Strategy:  %s\n", cfg.Strategy)
 			fmt.Printf("  Accounts:  %d\n\n", len(cfg.Accounts))
@@ -182,11 +193,12 @@ func initPool(host, port *string) string {
 	configPath := defaultConfigPath()
 	cfg, err := ensureConfig(configPath)
 	if err != nil {
+		accounts := defaultPoolAccounts()
 		auth.Pool = auth.NewTokenPool(
-			[]auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}},
+			accounts,
 			"round-robin",
 		)
-		slog.Info("single-account mode", "auth_file", auth.DefaultAuthPath())
+		slog.Info("single-account mode", "accounts", len(accounts), "auth_file", auth.DefaultAuthPath(), "access_token_env", envAccessTokenConfigured())
 		return configPath
 	}
 
@@ -201,9 +213,10 @@ func initPool(host, port *string) string {
 		strategy = "round-robin"
 	}
 
-	auth.Pool = auth.NewTokenPool(configToAccountConfigs(cfg), strategy)
+	accounts := accountsWithEnvAccessToken(configToAccountConfigs(cfg))
+	auth.Pool = auth.NewTokenPool(accounts, strategy)
 	slog.Info("multi-account mode",
-		"accounts", len(cfg.Accounts),
+		"accounts", len(accounts),
 		"strategy", strategy)
 	return configPath
 }
@@ -248,7 +261,7 @@ func loadPoolAccounts(configPath string) ([]auth.AccountConfig, string, error) {
 	cfg, err := ensureConfig(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}}, "round-robin", nil
+			return defaultPoolAccounts(), "round-robin", nil
 		}
 		return nil, "", err
 	}
@@ -256,7 +269,7 @@ func loadPoolAccounts(configPath string) ([]auth.AccountConfig, string, error) {
 	if strategy == "" {
 		strategy = "round-robin"
 	}
-	return configToAccountConfigs(cfg), strategy, nil
+	return accountsWithEnvAccessToken(configToAccountConfigs(cfg)), strategy, nil
 }
 
 func poolConfigSignature(configPath string) (string, error) {
@@ -271,6 +284,9 @@ func poolConfigSignature(configPath string) (string, error) {
 		b.WriteString(acc.Name)
 		b.WriteByte('\t')
 		b.WriteString(acc.AuthFile)
+		if acc.AccessToken != "" {
+			b.WriteString("\taccess-token")
+		}
 	}
 	return b.String(), nil
 }
@@ -282,8 +298,9 @@ type serveOptions struct {
 }
 
 type loginOptions struct {
-	authFile string
-	name     string
+	authFile        string
+	name            string
+	withAccessToken bool
 }
 
 type logoutOptions struct {
@@ -296,6 +313,7 @@ func parseLoginArgs(args []string) (loginOptions, error) {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.name, "name", "", "account name in proxy config")
+	fs.BoolVar(&opts.withAccessToken, "with-access-token", false, "read a Codex access token from stdin")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -455,6 +473,51 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+func defaultPoolAccounts() []auth.AccountConfig {
+	if acc, ok := envAccessTokenAccount(nil); ok {
+		return []auth.AccountConfig{acc}
+	}
+	return []auth.AccountConfig{{Name: "default", AuthFile: auth.DefaultAuthPath()}}
+}
+
+func accountsWithEnvAccessToken(accounts []auth.AccountConfig) []auth.AccountConfig {
+	if acc, ok := envAccessTokenAccount(accounts); ok {
+		return append([]auth.AccountConfig{acc}, accounts...)
+	}
+	return accounts
+}
+
+func envAccessTokenAccount(existing []auth.AccountConfig) (auth.AccountConfig, bool) {
+	token := strings.TrimSpace(os.Getenv("CODEX_ACCESS_TOKEN"))
+	if token == "" {
+		return auth.AccountConfig{}, false
+	}
+	return auth.AccountConfig{
+		Name:        uniqueAccountConfigName(existing, "codex-access-token"),
+		AccessToken: token,
+	}, true
+}
+
+func envAccessTokenConfigured() bool {
+	return strings.TrimSpace(os.Getenv("CODEX_ACCESS_TOKEN")) != ""
+}
+
+func uniqueAccountConfigName(accounts []auth.AccountConfig, preferred string) string {
+	used := map[string]bool{}
+	for _, acc := range accounts {
+		used[acc.Name] = true
+	}
+	if !used[preferred] {
+		return preferred
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", preferred, i)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
 func parseServeArgs(args []string) (serveOptions, error) {
 	maxBodyMB, err := defaultMaxBodyMB()
 	if err != nil {
@@ -608,7 +671,7 @@ func printUsage() {
 
 Usage:
   codex-proxy version                                   Show current version
-  codex-proxy login [--name NAME]                        Login via browser OAuth
+  codex-proxy login [--name NAME] [--with-access-token]  Login via browser OAuth or stdin token
   codex-proxy serve [--host H] [--port P] [--max-body-mb N]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage [--raw]                             Show account rate limit usage
@@ -632,6 +695,13 @@ Service management:
 Multi-account:
   Login with different --name values; proxy.json is updated automatically.
   See proxy.example.json for format.
+
+Codex access token:
+  export CODEX_ACCESS_TOKEN=<token>
+  codex-proxy serve
+
+  Or persist one locally:
+  echo "$CODEX_ACCESS_TOKEN" | codex-proxy login --with-access-token
 
 After login, any OpenAI-compatible client can use:
   base_url = http://127.0.0.1:10531/v1

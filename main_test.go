@@ -74,6 +74,17 @@ func TestParseLoginArgs(t *testing.T) {
 	if opts.name != "Alt Account" {
 		t.Errorf("name = %q, want Alt Account", opts.name)
 	}
+	if opts.withAccessToken {
+		t.Fatal("withAccessToken = true, want false")
+	}
+
+	tokenOpts, err := parseLoginArgs([]string{"--with-access-token"})
+	if err != nil {
+		t.Fatalf("parseLoginArgs with access token: %v", err)
+	}
+	if !tokenOpts.withAccessToken {
+		t.Fatal("withAccessToken = false, want true")
+	}
 
 	if _, err := parseLoginArgs([]string{"--unknown"}); err == nil {
 		t.Fatal("expected unknown flag error")
@@ -197,6 +208,7 @@ func TestUnregisterLoginAccountRemovesMatchingAuthFile(t *testing.T) {
 func TestLoadPoolAccountsFallsBackToDefaultWhenConfigMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
 
 	accounts, strategy, err := loadPoolAccounts(filepath.Join(home, "missing-proxy.json"))
 	if err != nil {
@@ -207,6 +219,57 @@ func TestLoadPoolAccountsFallsBackToDefaultWhenConfigMissing(t *testing.T) {
 	}
 	if len(accounts) != 1 || accounts[0].Name != "default" || accounts[0].AuthFile != auth.DefaultAuthPath() {
 		t.Fatalf("accounts = %#v, want default auth account", accounts)
+	}
+}
+
+func TestLoadPoolAccountsUsesAccessTokenEnvWhenConfigMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CODEX_ACCESS_TOKEN", "codex-token")
+
+	accounts, strategy, err := loadPoolAccounts(filepath.Join(home, "missing-proxy.json"))
+	if err != nil {
+		t.Fatalf("loadPoolAccounts: %v", err)
+	}
+	if strategy != "round-robin" {
+		t.Fatalf("strategy = %q, want round-robin", strategy)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("accounts = %#v, want env access token only", accounts)
+	}
+	if accounts[0].Name != "codex-access-token" || accounts[0].AccessToken != "codex-token" || accounts[0].AuthFile != "" {
+		t.Fatalf("env account = %#v, want access token account", accounts[0])
+	}
+}
+
+func TestLoadPoolAccountsPrependsAccessTokenEnvToConfigAccounts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("CODEX_ACCESS_TOKEN", "codex-token")
+
+	configPath := filepath.Join(home, "proxy.json")
+	if err := saveConfig(configPath, &ProxyConfig{
+		Accounts: []ProxyAccount{{Name: "default", AuthFile: filepath.Join(home, "auth.json")}},
+		Strategy: "random",
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	accounts, strategy, err := loadPoolAccounts(configPath)
+	if err != nil {
+		t.Fatalf("loadPoolAccounts: %v", err)
+	}
+	if strategy != "random" {
+		t.Fatalf("strategy = %q, want random", strategy)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("accounts = %#v, want env plus config", accounts)
+	}
+	if accounts[0].Name != "codex-access-token" || accounts[0].AccessToken != "codex-token" {
+		t.Fatalf("first account = %#v, want env access token", accounts[0])
+	}
+	if accounts[1].Name != "default" || accounts[1].AuthFile == "" {
+		t.Fatalf("second account = %#v, want config account", accounts[1])
 	}
 }
 

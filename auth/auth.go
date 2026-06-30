@@ -122,6 +122,20 @@ func NewTokenManager(name, filePath string) *TokenManager {
 	}
 }
 
+func NewAccessTokenManager(name, accessToken, accountID string) *TokenManager {
+	return &TokenManager{
+		name: name,
+		authFile: &AuthFile{
+			AuthMode: "access_token",
+			Tokens: Tokens{
+				AccessToken: accessToken,
+				AccountID:   accountID,
+			},
+			LastRefresh: time.Now(),
+		},
+	}
+}
+
 func (tm *TokenManager) Name() string     { return tm.name }
 func (tm *TokenManager) FilePath() string { return tm.filePath }
 
@@ -197,6 +211,7 @@ func (tm *TokenManager) StartBackgroundRefresh(ctx context.Context) {
 			case <-ticker.C:
 				tm.mu.RLock()
 				needsRefresh := tm.authFile != nil &&
+					!isAccessTokenAuth(tm.authFile) &&
 					time.Since(tm.authFile.LastRefresh) > ProactiveRefreshInterval
 				tm.mu.RUnlock()
 
@@ -228,6 +243,9 @@ func (tm *TokenManager) IsHealthy() (bool, string) {
 	if tm.authFile.Tokens.AccessToken == "" {
 		return false, "no access token"
 	}
+	if isAccessTokenAuth(tm.authFile) {
+		return true, "access token"
+	}
 	if tm.authFile.Tokens.RefreshToken == "" {
 		return false, "no refresh token"
 	}
@@ -244,6 +262,35 @@ func (tm *TokenManager) IsHealthy() (bool, string) {
 
 func Login() error {
 	return loginBrowser()
+}
+
+func LoginWithAccessToken(r io.Reader) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("failed to read access token: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return fmt.Errorf("empty access token")
+	}
+
+	authFile := &AuthFile{
+		AuthMode: "access_token",
+		Tokens: Tokens{
+			AccessToken: token,
+		},
+		LastRefresh: time.Now(),
+	}
+	if err := saveAuthFile(authFile, Manager.filePath); err != nil {
+		return err
+	}
+	Manager.mu.Lock()
+	Manager.authFile = authFile
+	Manager.mu.Unlock()
+
+	fmt.Println("  ✓ Access token saved")
+	fmt.Printf("  Token saved to %s\n", Manager.filePath)
+	return nil
 }
 
 func loginBrowser() error {
@@ -380,6 +427,10 @@ func (tm *TokenManager) EnsureFreshToken() (string, error) {
 		tm.authFile = af
 	}
 
+	if isAccessTokenAuth(tm.authFile) {
+		return tm.authFile.Tokens.AccessToken, nil
+	}
+
 	if time.Since(tm.authFile.LastRefresh) > RefreshInterval {
 		slog.Info("refreshing stale access token")
 		if err := tm.refreshLocked(); err != nil {
@@ -396,6 +447,9 @@ func (tm *TokenManager) RefreshNow() (string, error) {
 
 	if tm.authFile == nil {
 		return "", fmt.Errorf("no auth loaded")
+	}
+	if isAccessTokenAuth(tm.authFile) {
+		return "", fmt.Errorf("access token credentials cannot be refreshed")
 	}
 	if err := tm.refreshLocked(); err != nil {
 		return "", err
@@ -446,6 +500,16 @@ func (tm *TokenManager) GetAccessToken() string {
 		return ""
 	}
 	return tm.authFile.Tokens.AccessToken
+}
+
+func (tm *TokenManager) IsAccessTokenAuth() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.authFile != nil && isAccessTokenAuth(tm.authFile)
+}
+
+func isAccessTokenAuth(af *AuthFile) bool {
+	return af != nil && af.AuthMode == "access_token"
 }
 
 // AccountID returns the ChatGPT account id sent as the `chatgpt-account-id`
@@ -563,6 +627,10 @@ func ShowStatus() {
 	fmt.Println("  Has refresh:    ", af.Tokens.RefreshToken != "")
 	fmt.Println("  File:           ", Manager.filePath)
 
+	if isAccessTokenAuth(af) {
+		fmt.Println("  ✓ Access token auth")
+		return
+	}
 	if time.Since(af.LastRefresh) > RefreshInterval {
 		fmt.Println("  ⚠ Token is stale - will refresh on next API call")
 	} else {
@@ -584,7 +652,9 @@ func ShowStatusForFile(name, path string) {
 
 	staleness := time.Since(af.LastRefresh).Round(time.Minute)
 	status := "✓ fresh"
-	if time.Since(af.LastRefresh) > RefreshInterval {
+	if isAccessTokenAuth(af) {
+		status = "✓ access-token"
+	} else if time.Since(af.LastRefresh) > RefreshInterval {
 		status = "⚠ stale"
 	}
 

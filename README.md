@@ -6,7 +6,7 @@ Codex OAuth API Proxy. Use your ChatGPT subscription through the Codex backend a
 
 ## What it does
 
-`codex-proxy` authenticates with ChatGPT/Codex through browser OAuth, stores and refreshes the resulting tokens locally, and forwards compatible API requests to:
+`codex-proxy` authenticates with ChatGPT/Codex through browser OAuth or a Codex access token, then forwards compatible API requests to:
 
 ```text
 https://chatgpt.com/backend-api/codex/responses
@@ -18,8 +18,9 @@ The cost is covered by your ChatGPT subscription. It does not use OpenAI API cre
 ChatGPT subscription account
         |
 Browser OAuth login with PKCE
+or CODEX_ACCESS_TOKEN / access-token login
         |
-Local auth.json with access/refresh tokens
+Local auth.json with access/refresh tokens, or in-memory access token
         |
 codex-proxy on 127.0.0.1:10531
         |
@@ -37,6 +38,7 @@ Any SDK or client that can set a base URL
 - `/v1/models`, `/usage`, `/metrics`, `/health`, and root service metadata endpoints.
 - API key protection with `Authorization: Bearer ...` or `X-API-Key`.
 - API keys from `~/.codex-proxy/keys.json` and optional `CODEX_PROXY_API_KEY`.
+- Codex access token auth through `CODEX_ACCESS_TOKEN` or `codex-proxy login --with-access-token`.
 - Multi-account load balancing with `round-robin` or `random` strategy.
 - Automatic token refresh, refresh-and-retry on upstream 401, and backoff retry on upstream 429/5xx.
 - Linux systemd user service and macOS launchd user service.
@@ -118,6 +120,8 @@ go build -o codex-proxy .
 
 ### 1. Log in
 
+Browser OAuth:
+
 ```bash
 codex-proxy login
 ```
@@ -135,6 +139,22 @@ For multi-account setups, log in again with a different local account name:
 ```bash
 codex-proxy login --name alt
 ```
+
+Codex access token:
+
+```bash
+export CODEX_ACCESS_TOKEN="<token>"
+```
+
+With `CODEX_ACCESS_TOKEN` set, `codex-proxy serve` can run without a local auth file. The token stays in memory and is not written to `proxy.json`.
+
+To persist a Codex access token in the local auth file instead:
+
+```bash
+echo "$CODEX_ACCESS_TOKEN" | codex-proxy login --with-access-token
+```
+
+Codex access tokens are intended for ChatGPT workspace accounts that can create Codex access tokens, such as Business/Enterprise workspaces, and are useful for trusted non-interactive deployments.
 
 ### 2. Create an API key
 
@@ -442,14 +462,19 @@ Strategies:
 
 If an account fails with upstream 401, the proxy fails over to another healthy account. Failed accounts are retried after a cooldown. `codex-proxy status` and `codex-proxy usage` include all configured accounts.
 
+When `CODEX_ACCESS_TOKEN` is set, it is added as an in-memory account named `codex-access-token` and is tried along with accounts from `proxy.json`. It is not saved to `proxy.json`.
+
 ## Token management
 
 - Tokens are stored in `~/.codex-proxy/auth.json` by default.
 - `CODEX_HOME` changes the storage directory to `$CODEX_HOME/auth.json`, `$CODEX_HOME/keys.json`, and `$CODEX_HOME/proxy.json`.
 - Token files are written with `0600` permissions.
+- `CODEX_ACCESS_TOKEN` is used directly from the environment and is not written to disk.
+- `codex-proxy login --with-access-token` persists a static `access_token` auth file without a refresh token.
 - Tokens are treated as stale after 7 days.
 - Background refresh starts proactively after 5 days.
 - Upstream 401 triggers refresh-and-retry.
+- Static access-token credentials cannot be refreshed; rotate or replace the token if it expires or is revoked.
 - Upstream 429 and 5xx responses use exponential backoff retry, up to 2 retries.
 - Rotated refresh tokens are saved automatically.
 - Auth requests use a `curl` subprocess to improve compatibility on servers where direct Go TLS requests are blocked by Cloudflare fingerprinting.
@@ -574,7 +599,7 @@ Keep API key authentication enabled even behind Caddy.
 
 ```bash
 codex-proxy version
-codex-proxy login [--name NAME]
+codex-proxy login [--name NAME] [--with-access-token]
 codex-proxy serve [--host H] [--port P] [--max-body-mb N]
 codex-proxy status
 codex-proxy usage
@@ -609,6 +634,7 @@ GitHub Actions builds Linux and macOS release binaries for amd64 and arm64 when 
 ## Security notes
 
 - `auth.json` is equivalent to a password for your ChatGPT account. Do not commit or share it.
+- Treat Codex access tokens like passwords. Prefer `CODEX_ACCESS_TOKEN` or a secret manager for automation, and rotate tokens regularly.
 - API keys protect all non-public endpoints. Treat them as secrets.
 - `/key` in the Telegram bot intentionally displays full API keys. Only configure the bot for a private chat you control.
 - Do not run this as an open multi-tenant public service.

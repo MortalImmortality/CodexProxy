@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -45,6 +47,53 @@ func TestBuildCodexRequestBody(t *testing.T) {
 	}
 	if result["messages"] != nil {
 		t.Error("messages should not be in codex request")
+	}
+}
+
+func TestAccessTokenManagerUsesStaticToken(t *testing.T) {
+	tm := NewAccessTokenManager("team", "codex-token", "")
+
+	token, err := tm.EnsureFreshToken()
+	if err != nil {
+		t.Fatalf("EnsureFreshToken: %v", err)
+	}
+	if token != "codex-token" {
+		t.Fatalf("token = %q, want codex-token", token)
+	}
+
+	healthy, reason := tm.IsHealthy()
+	if !healthy {
+		t.Fatalf("static access token should be healthy: %s", reason)
+	}
+
+	if _, err := tm.RefreshNow(); err == nil {
+		t.Fatal("RefreshNow succeeded for static access token, want error")
+	}
+}
+
+func TestLoginWithAccessTokenPersistsStaticAuthFile(t *testing.T) {
+	oldManager := Manager
+	t.Cleanup(func() { Manager = oldManager })
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	Manager = NewTokenManager("default", path)
+
+	if err := LoginWithAccessToken(bytes.NewBufferString("  codex-token\n")); err != nil {
+		t.Fatalf("LoginWithAccessToken: %v", err)
+	}
+
+	af, err := loadAuthFile(path)
+	if err != nil {
+		t.Fatalf("loadAuthFile: %v", err)
+	}
+	if af.AuthMode != "access_token" {
+		t.Fatalf("AuthMode = %q, want access_token", af.AuthMode)
+	}
+	if af.Tokens.AccessToken != "codex-token" {
+		t.Fatalf("AccessToken = %q, want codex-token", af.Tokens.AccessToken)
+	}
+	if af.Tokens.RefreshToken != "" {
+		t.Fatalf("RefreshToken = %q, want empty", af.Tokens.RefreshToken)
 	}
 }
 

@@ -77,6 +77,47 @@ func TestPoolAcquireIncludesAccountID(t *testing.T) {
 	}
 }
 
+func TestPoolAcquireAccessTokenAccount(t *testing.T) {
+	pool := NewTokenPool([]AccountConfig{{
+		Name:        "team",
+		AccessToken: "codex-token",
+		AccountID:   "acct_123",
+	}}, "round-robin")
+
+	h, err := pool.Acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if h.Token != "codex-token" {
+		t.Fatalf("token = %q, want codex-token", h.Token)
+	}
+	if h.AccountID != "acct_123" {
+		t.Fatalf("AccountID = %q, want acct_123", h.AccountID)
+	}
+	if !h.Manager.IsAccessTokenAuth() {
+		t.Fatal("manager is not access-token auth")
+	}
+}
+
+func TestPoolUpdateAccountsReplacesChangedAccessToken(t *testing.T) {
+	pool := NewTokenPool([]AccountConfig{{Name: "team", AccessToken: "old-token"}}, "round-robin")
+	oldManager := pool.Managers()[0]
+
+	pool.UpdateAccounts([]AccountConfig{{Name: "team", AccessToken: "new-token"}}, "round-robin")
+	newManager := pool.Managers()[0]
+	if newManager == oldManager {
+		t.Fatal("changed access token reused old manager")
+	}
+
+	h, err := pool.Acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if h.Token != "new-token" {
+		t.Fatalf("token = %q, want new-token", h.Token)
+	}
+}
+
 func TestPoolUpdateAccountsPreservesAddsAndRemovesManagers(t *testing.T) {
 	pool := &TokenPool{strategy: "round-robin"}
 	a := newTestManager("a", "token-a")

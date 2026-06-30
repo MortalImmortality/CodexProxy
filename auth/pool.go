@@ -11,8 +11,10 @@ import (
 )
 
 type AccountConfig struct {
-	Name     string
-	AuthFile string
+	Name        string
+	AuthFile    string
+	AccessToken string
+	AccountID   string
 }
 
 type TokenHandle struct {
@@ -48,7 +50,7 @@ func NewTokenPool(accounts []AccountConfig, strategy string) *TokenPool {
 	}
 	p := &TokenPool{strategy: strategy}
 	for _, acc := range accounts {
-		tm := NewTokenManager(acc.Name, acc.AuthFile)
+		tm := newManagerFromConfig(acc)
 		p.managers = append(p.managers, tm)
 	}
 	return p
@@ -60,17 +62,17 @@ func (p *TokenPool) UpdateAccounts(accounts []AccountConfig, strategy string) {
 
 	existing := make(map[string]*TokenManager, len(p.managers))
 	for _, tm := range p.managers {
-		existing[accountKey(tm.name, tm.filePath)] = tm
+		existing[managerKey(tm)] = tm
 	}
 
 	managers := make([]*TokenManager, 0, len(accounts))
 	for _, acc := range accounts {
-		key := accountKey(acc.Name, acc.AuthFile)
+		key := accountKey(acc)
 		if tm := existing[key]; tm != nil {
 			managers = append(managers, tm)
 			continue
 		}
-		managers = append(managers, NewTokenManager(acc.Name, acc.AuthFile))
+		managers = append(managers, newManagerFromConfig(acc))
 	}
 	p.managers = managers
 	if strategy == "" {
@@ -79,8 +81,27 @@ func (p *TokenPool) UpdateAccounts(accounts []AccountConfig, strategy string) {
 	p.strategy = strategy
 }
 
-func accountKey(name, filePath string) string {
-	return name + "\x00" + filePath
+func newManagerFromConfig(acc AccountConfig) *TokenManager {
+	if acc.AccessToken != "" {
+		return NewAccessTokenManager(acc.Name, acc.AccessToken, acc.AccountID)
+	}
+	return NewTokenManager(acc.Name, acc.AuthFile)
+}
+
+func accountKey(acc AccountConfig) string {
+	return acc.Name + "\x00" + acc.AuthFile + "\x00" + acc.AccessToken + "\x00" + acc.AccountID
+}
+
+func managerKey(tm *TokenManager) string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	accessToken := ""
+	accountID := ""
+	if tm.authFile != nil && isAccessTokenAuth(tm.authFile) {
+		accessToken = tm.authFile.Tokens.AccessToken
+		accountID = tm.authFile.Tokens.AccountID
+	}
+	return tm.name + "\x00" + tm.filePath + "\x00" + accessToken + "\x00" + accountID
 }
 
 func (p *TokenPool) Acquire() (*TokenHandle, error) {
@@ -163,6 +184,7 @@ func (p *TokenPool) StartBackgroundRefresh(ctx context.Context) {
 				for _, tm := range p.Managers() {
 					tm.mu.RLock()
 					needsRefresh := tm.authFile != nil &&
+						!isAccessTokenAuth(tm.authFile) &&
 						time.Since(tm.authFile.LastRefresh) > ProactiveRefreshInterval
 					tm.mu.RUnlock()
 
