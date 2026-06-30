@@ -160,7 +160,7 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 		return fmt.Errorf("cannot start proxy: %w", err)
 	}
 
-	models, err := auth.DiscoverModels(handle.Token)
+	models, err := auth.DiscoverModelsForManager(ctx, handle.Manager)
 	if err != nil {
 		slog.Warn("model discovery failed; /v1/models will be empty and image generation unavailable until it succeeds", "error", err)
 		models = nil
@@ -283,7 +283,6 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 	if err != nil {
 		return nil, err
 	}
-	token := handle.Token
 
 	client := normalClient
 	if isStreaming {
@@ -295,22 +294,22 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 	refreshedAccounts := make(map[*auth.TokenManager]bool)
 	unauthorizedAccounts := make(map[*auth.TokenManager]bool)
 	rateLimitedAccounts := make(map[*auth.TokenManager]bool)
+	agentRetriedAccounts := make(map[*auth.TokenManager]bool)
 	var resp *http.Response
 
 	serverErrorRetries := 0
 	for {
 		req, _ := http.NewRequestWithContext(ctx, "POST", upstreamURL, bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "codex-proxy/1.0")
 		// Headers the Codex CLI sends; backend expects the Responses beta flag,
-		// originator, a session id, and SSE Accept. account-id when known.
+		// originator, a session id, and SSE Accept. Authorization + account
+		// headers are set per auth mode (Bearer or AgentAssertion).
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
 		req.Header.Set("originator", "codex_cli_rs")
 		req.Header.Set("session_id", sessionID)
 		req.Header.Set("Accept", "text/event-stream")
-		if accountID != "" {
-			req.Header.Set("chatgpt-account-id", accountID)
+		if err := handle.Manager.ApplyCodexAuth(ctx, req, accountID); err != nil {
+			return nil, fmt.Errorf("auth setup failed for %s: %w", handle.Manager.Name(), err)
 		}
 
 		resp, err = client.Do(req)
@@ -319,6 +318,17 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 		}
 
 		switch {
+		case resp.StatusCode == 401 && handle.Manager.IsAgentIdentity() && !agentRetriedAccounts[handle.Manager]:
+			// A stale agent task id reads as 401; drop it and re-register once
+			// on the same account before failing over.
+			resp.Body.Close()
+			agentRetriedAccounts[handle.Manager] = true
+			handle.Manager.InvalidateAgentTask()
+			slog.Warn("upstream 401 for agent-identity account, re-registering task",
+				"account", handle.Manager.Name())
+			stats.retries.Add(1)
+			continue
+
 		case resp.StatusCode == 401 && handle.Manager.IsAccessTokenAuth():
 			unauthorizedAccounts[handle.Manager] = true
 			if len(unauthorizedAccounts) >= len(auth.Pool.Managers()) {
@@ -337,7 +347,6 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 				"account", handle.Manager.Name(),
 				"next_account", nextHandle.Manager.Name())
 			handle = nextHandle
-			token = handle.Token
 			accountID = handle.AccountID
 			stats.retries.Add(1)
 			continue
@@ -348,15 +357,12 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 			slog.Warn("upstream 401, refreshing token",
 				"account", handle.Manager.Name())
 			stats.tokenRefreshes.Add(1)
-			token, err = handle.Refresh()
-			if err != nil {
+			if _, err = handle.Refresh(); err != nil {
 				handle2, err2 := auth.Pool.Acquire()
 				if err2 != nil {
 					return nil, fmt.Errorf("refresh failed: %w; fallback: %w", err, err2)
 				}
 				handle = handle2
-				token = handle.Token
-				accountID = handle.AccountID
 			}
 			accountID = handle.AccountID
 			refreshedAccounts[refreshManager] = true
@@ -394,7 +400,6 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 				"reset_at", resetAt,
 				"reset_source", resetSource)
 			handle = nextHandle
-			token = handle.Token
 			accountID = handle.AccountID
 			stats.retries.Add(1)
 			continue
@@ -517,14 +522,14 @@ func rateLimitResetAt(ctx context.Context, resp *http.Response, handle *auth.Tok
 		return until, "retry-after", tokenHandleEmail(handle)
 	}
 
-	if handle != nil && handle.Token != "" {
-		usageCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	if handle != nil && handle.Manager != nil {
+		usageCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		if handle.Manager != nil && handle.Manager.IsAccessTokenAuth() {
+		if handle.Manager.IsAccessTokenAuth() && !handle.Manager.IsAgentIdentity() {
 			_ = handle.Manager.EnsureAccessTokenMetadata(usageCtx)
 			handle.AccountID = handle.Manager.AccountID()
 		}
-		if info, err := auth.QueryUsageContextWithAccountID(usageCtx, handle.Token, handle.AccountID); err == nil {
+		if info, err := auth.QueryUsageForManager(usageCtx, handle.Manager); err == nil {
 			if resetSecs, ok := usageResetSeconds(info); ok {
 				return now.Add(time.Duration(resetSecs) * time.Second), "usage", info.Email
 			}

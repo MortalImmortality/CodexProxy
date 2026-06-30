@@ -26,7 +26,7 @@ codex-proxy start       # start background service
 codex-proxy stop / restart / logs / uninstall
 ```
 
-No external dependencies — stdlib only (Go 1.22+, uses log/slog and builtin min). Tests live under `auth/*_test.go` and `proxy/*_test.go`; run `go test ./...` before committing.
+Single external dependency: `golang.org/x/crypto` (used only for Codex agent-identity auth — ed25519 sealed-box `nacl/box` + `curve25519`). Otherwise stdlib (Go 1.22+, uses log/slog and builtin min). Tests live under `auth/*_test.go` and `proxy/*_test.go`; run `go test ./...` before committing.
 
 ## What This Is
 

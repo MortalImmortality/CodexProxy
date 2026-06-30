@@ -591,7 +591,7 @@ func telegramModelsText() string {
 	if err != nil {
 		return "🧠 <b>可用模型</b>\n\n• 错误：" + tgEscape(err.Error())
 	}
-	models, err := auth.DiscoverModels(handle.Token)
+	models, err := auth.DiscoverModelsForManager(context.Background(), handle.Manager)
 	if err != nil {
 		return "🧠 <b>可用模型</b>\n\n• 错误：" + tgEscape(err.Error())
 	}

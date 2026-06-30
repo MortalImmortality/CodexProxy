@@ -112,6 +112,10 @@ type TokenManager struct {
 	lastError   error
 	failedAt    time.Time
 	failedUntil time.Time
+
+	agentMu    sync.Mutex
+	agentID    *agentIdentity
+	agentToken string
 }
 
 var Manager *TokenManager
@@ -279,7 +283,13 @@ func LoginWithAccessToken(r io.Reader) error {
 	}
 
 	metadata := accessTokenMetadataFromJWT(token)
-	if fetched, err := FetchAccessTokenMetadata(context.Background(), token); err == nil {
+	// Agent-identity credentials (aud=codex-app-server) cannot use the whoami
+	// endpoint and carry their account id directly in the JWT; skip the lookup.
+	if isAgentIdentityToken(token) {
+		if _, err := newAgentIdentity(token); err != nil {
+			return fmt.Errorf("invalid agent identity token: %w", err)
+		}
+	} else if fetched, err := FetchAccessTokenMetadata(context.Background(), token); err == nil {
 		metadata = fetched
 	} else if metadata.ChatGPTAccountID == "" && !isAccessTokenTypeRejected(err) {
 		return fmt.Errorf("access token metadata lookup failed: %w", err)
@@ -597,6 +607,63 @@ func isAccessTokenAuth(af *AuthFile) bool {
 	return af != nil && af.AuthMode == "access_token"
 }
 
+// agentIdentity returns the parsed agent-identity credential for the current
+// access token, or nil when the token is an ordinary Bearer credential. The
+// parsed value (with its cached task id) is memoized per token.
+func (tm *TokenManager) agentIdentity() *agentIdentity {
+	tm.mu.RLock()
+	token := ""
+	if tm.authFile != nil {
+		token = tm.authFile.Tokens.AccessToken
+	}
+	tm.mu.RUnlock()
+	if token == "" {
+		return nil
+	}
+
+	tm.agentMu.Lock()
+	defer tm.agentMu.Unlock()
+	if tm.agentToken == token {
+		return tm.agentID
+	}
+	ai, err := newAgentIdentity(token)
+	if err != nil {
+		slog.Warn("failed to parse agent identity token", "account", tm.name, "error", err)
+		ai = nil
+	}
+	tm.agentToken = token
+	tm.agentID = ai
+	return ai
+}
+
+// IsAgentIdentity reports whether this account authenticates with a codex
+// agent-identity credential (AgentAssertion) rather than a Bearer token.
+func (tm *TokenManager) IsAgentIdentity() bool {
+	return tm.agentIdentity() != nil
+}
+
+// ApplyCodexAuth sets the auth headers for an upstream Codex request: an
+// AgentAssertion for agent-identity credentials, otherwise a Bearer token plus
+// account routing header. accountID overrides the stored account id when set.
+func (tm *TokenManager) ApplyCodexAuth(ctx context.Context, req *http.Request, accountID string) error {
+	if ai := tm.agentIdentity(); ai != nil {
+		return ai.apply(ctx, req, accountID)
+	}
+	req.Header.Set("Authorization", "Bearer "+tm.GetAccessToken())
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", accountID)
+	}
+	return nil
+}
+
+// InvalidateAgentTask drops a cached agent task id after a 401 so the next
+// request re-registers. No-op for Bearer accounts.
+func (tm *TokenManager) InvalidateAgentTask() {
+	if ai := tm.agentIdentity(); ai != nil {
+		ai.invalidateTask()
+	}
+}
+
 // AccountID returns the ChatGPT account id sent as the `chatgpt-account-id`
 // header. Prefers the stored value, falling back to the id_token JWT claim,
 // then to the access_token JWT claim for access-token auth (e.g. a
@@ -637,7 +704,11 @@ func accountIDFromJWT(idToken string) string {
 	if !decodeJWTClaims(idToken, &claims) {
 		return ""
 	}
-	return findJWTStringClaim(claims, "chatgpt_account_id")
+	if id := findJWTStringClaim(claims, "chatgpt_account_id"); id != "" {
+		return id
+	}
+	// Agent-identity tokens expose the account id as a top-level claim.
+	return findJWTStringClaim(claims, "account_id")
 }
 
 // emailFromJWT decodes an OpenAI id_token and extracts the top-level email
@@ -669,10 +740,19 @@ func accessTokenMetadataFromJWT(accessToken string) *AccessTokenMetadata {
 	if !decodeJWTClaims(accessToken, &claims) {
 		return &AccessTokenMetadata{}
 	}
+	accountID := findJWTStringClaim(claims, "chatgpt_account_id")
+	if accountID == "" {
+		// Agent-identity tokens carry the account id as a top-level claim.
+		accountID = findJWTStringClaim(claims, "account_id")
+	}
+	planType := findJWTStringClaim(claims, "chatgpt_plan_type")
+	if planType == "" {
+		planType = findJWTStringClaim(claims, "plan_type")
+	}
 	return &AccessTokenMetadata{
 		Email:            findJWTStringClaim(claims, "email"),
-		ChatGPTAccountID: findJWTStringClaim(claims, "chatgpt_account_id"),
-		ChatGPTPlanType:  findJWTStringClaim(claims, "chatgpt_plan_type"),
+		ChatGPTAccountID: accountID,
+		ChatGPTPlanType:  planType,
 	}
 }
 
@@ -823,10 +903,29 @@ func openBrowser(url string) {
 }
 
 func DiscoverModels(accessToken string) ([]string, error) {
-	req, _ := http.NewRequest("GET", CodexBaseURL+"/models?client_version=1.0.0", nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+	return discoverModels(context.Background(), bearerCodexAuth(accessToken, ""))
+}
+
+// DiscoverModelsForManager discovers models using the account's auth mode
+// (AgentAssertion for agent-identity credentials, Bearer otherwise).
+func DiscoverModelsForManager(ctx context.Context, tm *TokenManager) ([]string, error) {
+	if _, err := tm.EnsureFreshToken(); err != nil {
+		return nil, err
+	}
+	auth := tm.codexAuthFunc(tm.AccountID())
+	models, err := discoverModels(ctx, auth)
+	if err != nil && tm.retryAgentAuth(err) {
+		models, err = discoverModels(ctx, auth)
+	}
+	return models, err
+}
+
+func discoverModels(ctx context.Context, auth codexAuthFunc) ([]string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", CodexBaseURL+"/models?client_version=1.0.0", nil)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "codex-proxy/1.0")
+	if err := auth(ctx, req); err != nil {
+		return nil, err
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -947,16 +1046,19 @@ func QueryUsageWithAccountID(accessToken, accountID string) (*UsageInfo, error) 
 }
 
 func QueryUsageForManager(ctx context.Context, tm *TokenManager) (*UsageInfo, error) {
-	token, err := tm.EnsureFreshToken()
-	if err != nil {
+	if _, err := tm.EnsureFreshToken(); err != nil {
 		return nil, err
 	}
-	if tm.IsAccessTokenAuth() {
+	if tm.IsAccessTokenAuth() && !tm.IsAgentIdentity() {
 		if err := tm.EnsureAccessTokenMetadata(ctx); err != nil {
 			return nil, fmt.Errorf("access token metadata lookup failed: %w", err)
 		}
 	}
-	info, err := QueryUsageContextWithAccountID(ctx, token, tm.AccountID())
+	auth := tm.codexAuthFunc(tm.AccountID())
+	info, err := queryUsage(ctx, auth)
+	if err != nil && tm.retryAgentAuth(err) {
+		info, err = queryUsage(ctx, auth)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -967,8 +1069,14 @@ func QueryUsageForManager(ctx context.Context, tm *TokenManager) (*UsageInfo, er
 }
 
 func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID string) (*UsageInfo, error) {
+	return queryUsage(ctx, bearerCodexAuth(accessToken, accountID))
+}
+
+func queryUsage(ctx context.Context, auth codexAuthFunc) (*UsageInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", UsageURL, nil)
-	setCodexAuthHeaders(req, accessToken, accountID)
+	if err := auth(ctx, req); err != nil {
+		return nil, err
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -985,7 +1093,7 @@ func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID 
 	if err != nil {
 		return nil, err
 	}
-	activity, profileRaw, err := QueryTokenActivityContext(ctx, accessToken, accountID)
+	activity, profileRaw, err := queryTokenActivity(ctx, auth)
 	if err == nil {
 		info.TokenActivity = activity
 		info.RawJSON = combineRawUsageJSON(body, profileRaw)
@@ -997,16 +1105,20 @@ func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID 
 }
 
 func ResetUsageForManager(ctx context.Context, tm *TokenManager) (*UsageResetResult, error) {
-	token, err := tm.EnsureFreshToken()
-	if err != nil {
+	if _, err := tm.EnsureFreshToken(); err != nil {
 		return nil, err
 	}
-	if tm.IsAccessTokenAuth() {
+	if tm.IsAccessTokenAuth() && !tm.IsAgentIdentity() {
 		if err := tm.EnsureAccessTokenMetadata(ctx); err != nil {
 			return nil, fmt.Errorf("access token metadata lookup failed: %w", err)
 		}
 	}
-	result, err := ResetUsageContextWithAccountID(ctx, token, tm.AccountID(), newIdempotencyKey())
+	key := newIdempotencyKey()
+	auth := tm.codexAuthFunc(tm.AccountID())
+	result, err := resetUsage(ctx, auth, key)
+	if err != nil && tm.retryAgentAuth(err) {
+		result, err = resetUsage(ctx, auth, key)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1017,6 +1129,10 @@ func ResetUsageForManager(ctx context.Context, tm *TokenManager) (*UsageResetRes
 }
 
 func ResetUsageContextWithAccountID(ctx context.Context, accessToken, accountID, idempotencyKey string) (*UsageResetResult, error) {
+	return resetUsage(ctx, bearerCodexAuth(accessToken, accountID), idempotencyKey)
+}
+
+func resetUsage(ctx context.Context, auth codexAuthFunc, idempotencyKey string) (*UsageResetResult, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return nil, fmt.Errorf("idempotency key is required")
 	}
@@ -1025,7 +1141,9 @@ func ResetUsageContextWithAccountID(ctx context.Context, accessToken, accountID,
 		return nil, err
 	}
 	req, _ := http.NewRequestWithContext(ctx, "POST", UsageResetURL, strings.NewReader(string(body)))
-	setCodexAuthHeaders(req, accessToken, accountID)
+	if err := auth(ctx, req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
@@ -1227,8 +1345,14 @@ func FetchAccessTokenMetadata(ctx context.Context, accessToken string) (*AccessT
 }
 
 func QueryTokenActivityContext(ctx context.Context, accessToken, accountID string) (*UsageTokenActivity, []byte, error) {
+	return queryTokenActivity(ctx, bearerCodexAuth(accessToken, accountID))
+}
+
+func queryTokenActivity(ctx context.Context, auth codexAuthFunc) (*UsageTokenActivity, []byte, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", UsageProfileURL, nil)
-	setCodexAuthHeaders(req, accessToken, accountID)
+	if err := auth(ctx, req); err != nil {
+		return nil, nil, err
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1298,6 +1422,41 @@ func setCodexAuthHeaders(req *http.Request, accessToken, accountID string) {
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-Id", accountID)
 	}
+}
+
+// codexAuthFunc sets the Authorization, account, and base headers on a request
+// to the Codex/usage backend. It abstracts Bearer vs AgentAssertion auth.
+type codexAuthFunc func(ctx context.Context, req *http.Request) error
+
+// bearerCodexAuth authenticates with a raw Bearer access token.
+func bearerCodexAuth(accessToken, accountID string) codexAuthFunc {
+	return func(_ context.Context, req *http.Request) error {
+		setCodexAuthHeaders(req, accessToken, accountID)
+		return nil
+	}
+}
+
+// codexAuthFunc returns an applier that authenticates as this account, using an
+// AgentAssertion for agent-identity credentials or a Bearer token otherwise.
+func (tm *TokenManager) codexAuthFunc(accountID string) codexAuthFunc {
+	return func(ctx context.Context, req *http.Request) error {
+		req.Header.Set("User-Agent", "codex-proxy/1.0")
+		req.Header.Set("Accept", "application/json")
+		return tm.ApplyCodexAuth(ctx, req, accountID)
+	}
+}
+
+// retryAgentAuth reports whether err is a 401 on an agent-identity account; if
+// so it drops the cached task id so the caller can retry with a fresh one.
+func (tm *TokenManager) retryAgentAuth(err error) bool {
+	if err == nil || !tm.IsAgentIdentity() {
+		return false
+	}
+	if !strings.Contains(err.Error(), "returned 401") {
+		return false
+	}
+	tm.InvalidateAgentTask()
+	return true
 }
 
 func combineRawUsageJSON(usageRaw, profileRaw []byte) string {
