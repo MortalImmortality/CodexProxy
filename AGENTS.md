@@ -3,6 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 - DO NOT send optional commentary
+- DO NOT commit, push, create branches, tags, or pull requests unless the user explicitly asks for that exact git action in the current turn. Running tests or making code changes is not permission to commit or push.
 
 ## Build & Run
 
