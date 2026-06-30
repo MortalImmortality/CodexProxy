@@ -967,6 +967,52 @@ func TestCallUpstreamRefreshesOn401AndRetriesWithAccountID(t *testing.T) {
 	}
 }
 
+func TestCallUpstreamDoesNotRefreshAccessTokenAccountOn401(t *testing.T) {
+	oldPool := auth.Pool
+	oldNormalClient := normalClient
+	oldStreamClient := streamClient
+	t.Cleanup(func() {
+		auth.Pool = oldPool
+		normalClient = oldNormalClient
+		streamClient = oldStreamClient
+	})
+	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{{
+		Name:        "access",
+		AccessToken: "static-token",
+		AccountID:   "acct-access",
+	}}, "round-robin")
+
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.Header.Get("Authorization"); got != "Bearer static-token" {
+			t.Fatalf("Authorization = %q, want static token", got)
+		}
+		if got := r.Header.Get("chatgpt-account-id"); got != "acct-access" {
+			t.Fatalf("chatgpt-account-id = %q, want acct-access", got)
+		}
+		http.Error(w, "expired", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+	normalClient = upstream.Client()
+	streamClient = upstream.Client()
+
+	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
+	if err != nil {
+		t.Fatalf("callUpstream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+	if auth.Pool.Managers()[0].IsFailed() {
+		t.Fatal("access-token account should not be marked failed by refresh path")
+	}
+}
+
 func TestCallUpstreamFallsBackToAnotherAccountWhenRefreshFails(t *testing.T) {
 	dir := t.TempDir()
 	authFileA := filepath.Join(dir, "auth-a.json")

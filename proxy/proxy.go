@@ -293,6 +293,7 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 	accountID := handle.AccountID
 	sessionID := newUUID()
 	refreshedAccounts := make(map[*auth.TokenManager]bool)
+	unauthorizedAccounts := make(map[*auth.TokenManager]bool)
 	rateLimitedAccounts := make(map[*auth.TokenManager]bool)
 	var resp *http.Response
 
@@ -318,6 +319,29 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 		}
 
 		switch {
+		case resp.StatusCode == 401 && handle.Manager.IsAccessTokenAuth():
+			unauthorizedAccounts[handle.Manager] = true
+			if len(unauthorizedAccounts) >= len(auth.Pool.Managers()) {
+				tagUpstreamAccount(resp, handle)
+				return resp, nil
+			}
+
+			nextHandle, err := acquireUntriedAccount(unauthorizedAccounts)
+			if err != nil {
+				tagUpstreamAccount(resp, handle)
+				return resp, nil
+			}
+			resp.Body.Close()
+
+			slog.Warn("upstream 401 for access-token account, trying another account",
+				"account", handle.Manager.Name(),
+				"next_account", nextHandle.Manager.Name())
+			handle = nextHandle
+			token = handle.Token
+			accountID = handle.AccountID
+			stats.retries.Add(1)
+			continue
+
 		case resp.StatusCode == 401 && !refreshedAccounts[handle.Manager]:
 			resp.Body.Close()
 			refreshManager := handle.Manager
