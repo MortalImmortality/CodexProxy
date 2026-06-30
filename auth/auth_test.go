@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -116,6 +117,28 @@ func TestLoginWithAccessTokenPersistsStaticAuthFile(t *testing.T) {
 	}
 	if af.Tokens.AccountID != "acct_123" {
 		t.Fatalf("AccountID = %q, want acct_123", af.Tokens.AccountID)
+	}
+}
+
+func TestAccountIDFallsBackToAccessTokenJWT(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_jwt"}}`))
+	accessToken := "header." + payload + ".sig"
+
+	tm := &TokenManager{
+		authFile: &AuthFile{
+			AuthMode: "access_token",
+			Tokens:   Tokens{AccessToken: accessToken},
+		},
+	}
+	if got := tm.AccountID(); got != "acct_jwt" {
+		t.Fatalf("AccountID = %q, want acct_jwt", got)
+	}
+
+	// Stored id wins over the JWT claim.
+	tm.authFile.Tokens.AccountID = "acct_stored"
+	if got := tm.AccountID(); got != "acct_stored" {
+		t.Fatalf("AccountID = %q, want acct_stored", got)
 	}
 }
 

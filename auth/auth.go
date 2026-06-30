@@ -593,7 +593,9 @@ func isAccessTokenAuth(af *AuthFile) bool {
 }
 
 // AccountID returns the ChatGPT account id sent as the `chatgpt-account-id`
-// header. Prefers the stored value, falling back to the id_token JWT claim.
+// header. Prefers the stored value, falling back to the id_token JWT claim,
+// then to the access_token JWT claim for access-token auth (e.g. a
+// CODEX_ACCESS_TOKEN env account whose id was never resolved).
 func (tm *TokenManager) AccountID() string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -603,7 +605,13 @@ func (tm *TokenManager) AccountID() string {
 	if id := tm.authFile.Tokens.AccountID; id != "" {
 		return id
 	}
-	return accountIDFromJWT(tm.authFile.Tokens.IDToken)
+	if id := accountIDFromJWT(tm.authFile.Tokens.IDToken); id != "" {
+		return id
+	}
+	if isAccessTokenAuth(tm.authFile) {
+		return accountIDFromJWT(tm.authFile.Tokens.AccessToken)
+	}
+	return ""
 }
 
 // Email returns the account email from the id_token JWT when available.
