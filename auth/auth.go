@@ -278,8 +278,10 @@ func LoginWithAccessToken(r io.Reader) error {
 		return err
 	}
 
-	metadata, err := FetchAccessTokenMetadata(context.Background(), token)
-	if err != nil {
+	metadata := accessTokenMetadataFromJWT(token)
+	if fetched, err := FetchAccessTokenMetadata(context.Background(), token); err == nil {
+		metadata = fetched
+	} else if metadata.ChatGPTAccountID == "" && !isAccessTokenTypeRejected(err) {
 		return fmt.Errorf("access token metadata lookup failed: %w", err)
 	}
 
@@ -515,6 +517,9 @@ func (tm *TokenManager) EnsureAccessTokenMetadata(ctx context.Context) error {
 	if accountID == "" {
 		metadata, err := FetchAccessTokenMetadata(ctx, accessToken)
 		if err != nil {
+			if isAccessTokenTypeRejected(err) {
+				return nil
+			}
 			return err
 		}
 		accountID = metadata.ChatGPTAccountID
@@ -624,18 +629,15 @@ func (tm *TokenManager) Email() string {
 	return emailFromJWT(tm.authFile.Tokens.IDToken)
 }
 
-// accountIDFromJWT decodes an OpenAI id_token and extracts
-// auth["chatgpt_account_id"]. Returns "" on any parse failure.
+// accountIDFromJWT decodes an OpenAI JWT and extracts the ChatGPT account id.
+// Claims have used a few shapes across id_token and access-token flows, so this
+// accepts either the namespaced auth claim or a direct chatgpt_account_id claim.
 func accountIDFromJWT(idToken string) string {
-	var claims struct {
-		Auth struct {
-			ChatGPTAccountID string `json:"chatgpt_account_id"`
-		} `json:"https://api.openai.com/auth"`
-	}
+	var claims map[string]interface{}
 	if !decodeJWTClaims(idToken, &claims) {
 		return ""
 	}
-	return claims.Auth.ChatGPTAccountID
+	return findJWTStringClaim(claims, "chatgpt_account_id")
 }
 
 // emailFromJWT decodes an OpenAI id_token and extracts the top-level email
@@ -660,6 +662,45 @@ func decodeJWTClaims(idToken string, dest interface{}) bool {
 		return false
 	}
 	return json.Unmarshal(payload, dest) == nil
+}
+
+func accessTokenMetadataFromJWT(accessToken string) *AccessTokenMetadata {
+	var claims map[string]interface{}
+	if !decodeJWTClaims(accessToken, &claims) {
+		return &AccessTokenMetadata{}
+	}
+	return &AccessTokenMetadata{
+		Email:            findJWTStringClaim(claims, "email"),
+		ChatGPTAccountID: findJWTStringClaim(claims, "chatgpt_account_id"),
+		ChatGPTPlanType:  findJWTStringClaim(claims, "chatgpt_plan_type"),
+	}
+}
+
+func findJWTStringClaim(v interface{}, key string) string {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		if raw, ok := typed[key]; ok {
+			if s, ok := raw.(string); ok {
+				return s
+			}
+		}
+		for _, child := range typed {
+			if s := findJWTStringClaim(child, key); s != "" {
+				return s
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			if s := findJWTStringClaim(child, key); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func isAccessTokenTypeRejected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "auth_token_type_not_allowed")
 }
 
 // ──────────────────────────────────────────────

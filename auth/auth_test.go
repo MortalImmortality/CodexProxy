@@ -142,6 +142,53 @@ func TestAccountIDFallsBackToAccessTokenJWT(t *testing.T) {
 	}
 }
 
+func TestAccountIDFallsBackToDirectAccessTokenClaim(t *testing.T) {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"chatgpt_account_id":"acct_direct"}`))
+	accessToken := "header." + payload + ".sig"
+
+	tm := &TokenManager{
+		authFile: &AuthFile{
+			AuthMode: "access_token",
+			Tokens:   Tokens{AccessToken: accessToken},
+		},
+	}
+	if got := tm.AccountID(); got != "acct_direct" {
+		t.Fatalf("AccountID = %q, want acct_direct", got)
+	}
+}
+
+func TestLoginWithAccessTokenFallsBackToJWTWhenWhoamiRejectsTokenType(t *testing.T) {
+	oldManager := Manager
+	t.Cleanup(func() { Manager = oldManager })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"auth_token_type_not_allowed"}}`))
+	}))
+	defer server.Close()
+	oldWhoamiURL := AccessTokenWhoamiURL
+	AccessTokenWhoamiURL = server.URL
+	t.Cleanup(func() { AccessTokenWhoamiURL = oldWhoamiURL })
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	Manager = NewTokenManager("default", path)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"email":"user@example.com","chatgpt_account_id":"acct_jwt"}`))
+	token := "header." + payload + ".sig"
+
+	if err := LoginWithAccessToken(bytes.NewBufferString(token + "\n")); err != nil {
+		t.Fatalf("LoginWithAccessToken: %v", err)
+	}
+
+	af, err := loadAuthFile(path)
+	if err != nil {
+		t.Fatalf("loadAuthFile: %v", err)
+	}
+	if af.Tokens.AccountID != "acct_jwt" {
+		t.Fatalf("AccountID = %q, want acct_jwt", af.Tokens.AccountID)
+	}
+}
+
 func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
 	var usageSawAccountID, profileSawAccountID bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +269,65 @@ func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
 	}
 	if info.TokenActivity == nil || info.TokenActivity.Summary.LifetimeTokens == nil || *info.TokenActivity.Summary.LifetimeTokens != 12345 {
 		t.Fatalf("TokenActivity = %#v", info.TokenActivity)
+	}
+}
+
+func TestQueryUsageForAccessTokenManagerContinuesWhenWhoamiRejectsTokenType(t *testing.T) {
+	var usageCalled, profileCalled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
+			t.Fatalf("%s Authorization = %q, want bearer token", r.URL.Path, got)
+		}
+		switch r.URL.Path {
+		case "/whoami":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"auth_token_type_not_allowed"}}`))
+		case "/usage":
+			usageCalled = true
+			_, _ = w.Write([]byte(`{
+				"plan_type":"team",
+				"email":"user@example.com",
+				"rate_limit":{
+					"allowed":true,
+					"limit_reached":false,
+					"primary_window":{
+						"used_percent":25,
+						"limit_window_seconds":3600,
+						"reset_after_seconds":1800
+					}
+				}
+			}`))
+		case "/profile":
+			profileCalled = true
+			_, _ = w.Write([]byte(`{"stats":{"lifetime_tokens":12345}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	oldWhoamiURL, oldUsageURL, oldProfileURL := AccessTokenWhoamiURL, UsageURL, UsageProfileURL
+	AccessTokenWhoamiURL = server.URL + "/whoami"
+	UsageURL = server.URL + "/usage"
+	UsageProfileURL = server.URL + "/profile"
+	t.Cleanup(func() {
+		AccessTokenWhoamiURL = oldWhoamiURL
+		UsageURL = oldUsageURL
+		UsageProfileURL = oldProfileURL
+	})
+
+	tm := NewAccessTokenManager("team", "codex-token", "")
+	info, err := QueryUsageForManager(context.Background(), tm)
+	if err != nil {
+		t.Fatalf("QueryUsageForManager: %v", err)
+	}
+	if !usageCalled {
+		t.Fatal("usage endpoint was not called")
+	}
+	if !profileCalled {
+		t.Fatal("profile endpoint was not called")
+	}
+	if info.PlanType != "team" || len(info.Windows) != 1 || info.Windows[0].UsedPercent != 25 {
+		t.Fatalf("usage info = %#v", info)
 	}
 }
 
