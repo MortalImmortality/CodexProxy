@@ -332,7 +332,7 @@ func TestQueryUsageForAccessTokenManagerContinuesWhenWhoamiRejectsTokenType(t *t
 }
 
 func TestResetUsageForManagerClearsFailedState(t *testing.T) {
-	var sawAccountID, sawIdempotencyKey bool
+	var sawAccountID, sawRedeemRequestID bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
 			t.Fatalf("Authorization = %q, want bearer token", got)
@@ -342,7 +342,10 @@ func TestResetUsageForManagerClearsFailedState(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
-		sawIdempotencyKey = body["idempotencyKey"] != ""
+		if _, ok := body["idempotencyKey"]; ok {
+			t.Fatal("reset request included obsolete idempotencyKey field")
+		}
+		sawRedeemRequestID = body["redeem_request_id"] != ""
 		_, _ = w.Write([]byte(`{"outcome":"reset"}`))
 	}))
 	defer server.Close()
@@ -363,8 +366,8 @@ func TestResetUsageForManagerClearsFailedState(t *testing.T) {
 	if !sawAccountID {
 		t.Fatal("reset request did not include ChatGPT-Account-Id")
 	}
-	if !sawIdempotencyKey {
-		t.Fatal("reset request did not include idempotencyKey")
+	if !sawRedeemRequestID {
+		t.Fatal("reset request did not include redeem_request_id")
 	}
 	if tm.IsFailed() {
 		t.Fatal("manager is still failed after reset")

@@ -1148,7 +1148,7 @@ func resetUsage(ctx context.Context, auth codexAuthFunc, idempotencyKey string) 
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return nil, fmt.Errorf("idempotency key is required")
 	}
-	body, err := json.Marshal(map[string]string{"idempotencyKey": idempotencyKey})
+	body, err := json.Marshal(map[string]string{"redeem_request_id": idempotencyKey})
 	if err != nil {
 		return nil, err
 	}
