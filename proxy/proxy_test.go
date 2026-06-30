@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1143,7 +1144,7 @@ func TestNotifyUpstreamRateLimitIncludesAccount(t *testing.T) {
 
 	select {
 	case event := <-events:
-		if event.AccountName != "a" || event.AccountID != "acct-a" || event.Status != http.StatusTooManyRequests {
+		if event.AccountName != "a" || event.AccountID != "acct-a" || event.AccountEmail != "acct-a@example.com" || event.Status != http.StatusTooManyRequests {
 			t.Fatalf("event = %#v", event)
 		}
 		if event.Message != "usage limit reached" {
@@ -1159,6 +1160,7 @@ func writeTestAuthFile(t *testing.T, path, accessToken, refreshToken, accountID 
 	authFile := auth.AuthFile{
 		AuthMode: "browser",
 		Tokens: auth.Tokens{
+			IDToken:      testIDToken(accountID + "@example.com"),
 			AccessToken:  accessToken,
 			RefreshToken: refreshToken,
 			AccountID:    accountID,
@@ -1172,6 +1174,12 @@ func writeTestAuthFile(t *testing.T, path, accessToken, refreshToken, accountID 
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
+}
+
+func testIDToken(email string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `"}`))
+	return header + "." + payload + "."
 }
 
 func writeFakeCurl(t *testing.T, dir, responseJSON string) {

@@ -92,12 +92,13 @@ func TestTelegramMessageFormatting(t *testing.T) {
 		t.Fatalf("service error text = %q", got)
 	}
 	if got := telegramRateLimitAlertText(proxy.UpstreamRateLimitEvent{
-		AccountName: "acct <name>",
-		AccountID:   "acct_<id>",
-		Status:      http.StatusTooManyRequests,
-		Message:     "usage <limit> reached",
-		ResetAt:     time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
-	}); !strings.Contains(got, "⛔ <b>账号额度可能已用尽</b>") || !strings.Contains(got, "acct &lt;name&gt;") || !strings.Contains(got, "acct_&lt;id&gt;") || !strings.Contains(got, "usage &lt;limit&gt; reached") || !strings.Contains(got, "预计恢复") {
+		AccountName:  "acct <name>",
+		AccountID:    "acct_<id>",
+		AccountEmail: "user@example.com",
+		Status:       http.StatusTooManyRequests,
+		Message:      "usage <limit> reached",
+		ResetAt:      time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC),
+	}); !strings.Contains(got, "⛔ <b>账号额度可能已用尽</b>") || !strings.Contains(got, "👤 <b>user@example.com</b>") || strings.Contains(got, "• 名称：") || strings.Contains(got, "• Account ID：") || !strings.Contains(got, "usage &lt;limit&gt; reached") || !strings.Contains(got, "预计恢复") {
 		t.Fatalf("rate limit alert text = %q", got)
 	}
 	if got := telegramDoctorTextFromChecks([]doctorCheck{

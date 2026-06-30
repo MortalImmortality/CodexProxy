@@ -462,26 +462,52 @@ func (tm *TokenManager) AccountID() string {
 	return accountIDFromJWT(tm.authFile.Tokens.IDToken)
 }
 
+// Email returns the account email from the id_token JWT when available.
+func (tm *TokenManager) Email() string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if tm.authFile == nil {
+		return ""
+	}
+	return emailFromJWT(tm.authFile.Tokens.IDToken)
+}
+
 // accountIDFromJWT decodes an OpenAI id_token and extracts
 // auth["chatgpt_account_id"]. Returns "" on any parse failure.
 func accountIDFromJWT(idToken string) string {
-	parts := strings.Split(idToken, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return ""
-	}
 	var claims struct {
 		Auth struct {
 			ChatGPTAccountID string `json:"chatgpt_account_id"`
 		} `json:"https://api.openai.com/auth"`
 	}
-	if json.Unmarshal(payload, &claims) != nil {
+	if !decodeJWTClaims(idToken, &claims) {
 		return ""
 	}
 	return claims.Auth.ChatGPTAccountID
+}
+
+// emailFromJWT decodes an OpenAI id_token and extracts the top-level email
+// claim. Returns "" on any parse failure.
+func emailFromJWT(idToken string) string {
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if !decodeJWTClaims(idToken, &claims) {
+		return ""
+	}
+	return claims.Email
+}
+
+func decodeJWTClaims(idToken string, dest interface{}) bool {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(payload, dest) == nil
 }
 
 // ──────────────────────────────────────────────

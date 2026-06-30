@@ -229,6 +229,9 @@ func (b *telegramBot) sendRateLimitAlert(_ context.Context, event proxy.Upstream
 		return
 	}
 	accountKey := event.AccountName
+	if event.AccountEmail != "" {
+		accountKey = event.AccountEmail
+	}
 	if accountKey == "" {
 		accountKey = event.AccountID
 	}
@@ -432,13 +435,15 @@ func telegramLastErrorRows(err *proxy.ErrorDetail) []string {
 }
 
 func telegramRateLimitAlertText(event proxy.UpstreamRateLimitEvent) string {
-	account := event.AccountName
+	account := event.AccountEmail
+	if account == "" {
+		account = event.AccountName
+	}
+	if account == "" {
+		account = event.AccountID
+	}
 	if account == "" {
 		account = "unknown"
-	}
-	accountID := event.AccountID
-	if accountID == "" {
-		accountID = "unknown"
 	}
 	message := strings.TrimSpace(event.Message)
 	if message == "" {
@@ -450,9 +455,7 @@ func telegramRateLimitAlertText(event proxy.UpstreamRateLimitEvent) string {
 	lines := []string{
 		"⛔ <b>账号额度可能已用尽</b>",
 		"",
-		"👤 <b>账号</b>",
-		"• 名称：" + tgEscape(account),
-		"• Account ID：" + tgEscape(accountID),
+		"👤 <b>" + tgEscape(account) + "</b>",
 	}
 	if !event.ResetAt.IsZero() {
 		lines = append(lines, "• 预计恢复："+tgEscape(event.ResetAt.Local().Format("2006-01-02 15:04:05 MST")))
