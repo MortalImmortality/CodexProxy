@@ -493,6 +493,9 @@ func rateLimitResetAt(ctx context.Context, resp *http.Response, handle *auth.Tok
 	}
 
 	if handle != nil && handle.Token != "" {
+		if handle.Manager != nil && handle.Manager.IsAccessTokenAuth() {
+			return now.Add(5 * time.Minute), "fallback", tokenHandleEmail(handle)
+		}
 		usageCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		if info, err := auth.QueryUsageContext(usageCtx, handle.Token); err == nil {
@@ -2519,6 +2522,14 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 			results = append(results, map[string]interface{}{
 				"account": tm.Name(),
 				"error":   err.Error(),
+			})
+			continue
+		}
+		if tm.IsAccessTokenAuth() {
+			results = append(results, map[string]interface{}{
+				"account":           tm.Name(),
+				"usage_unavailable": true,
+				"reason":            auth.UsageUnsupportedForAccessToken,
 			})
 			continue
 		}

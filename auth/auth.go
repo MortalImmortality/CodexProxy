@@ -760,7 +760,10 @@ func DiscoverModels(accessToken string) ([]string, error) {
 	return models, nil
 }
 
-const UsageURL = "https://chatgpt.com/backend-api/wham/usage"
+const (
+	UsageURL                       = "https://chatgpt.com/backend-api/wham/usage"
+	UsageUnsupportedForAccessToken = "usage is unavailable for Codex access token credentials"
+)
 
 type UsageWindow struct {
 	Name        string `json:"name"`

@@ -589,6 +589,10 @@ func cmdUsage(args []string) error {
 			fmt.Fprintf(os.Stderr, "Cannot get token: %v\n", err)
 			os.Exit(1)
 		}
+		if auth.Manager.IsAccessTokenAuth() {
+			fmt.Printf("  [default] %s\n\n", auth.UsageUnsupportedForAccessToken)
+			return nil
+		}
 		info, err := auth.QueryUsage(token)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Usage query failed: %v\n", err)
@@ -607,6 +611,10 @@ func cmdUsage(args []string) error {
 		token, err := tm.EnsureFreshToken()
 		if err != nil {
 			fmt.Printf("  [%s] error: %v\n\n", acc.Name, err)
+			continue
+		}
+		if tm.IsAccessTokenAuth() {
+			fmt.Printf("  [%s] %s\n\n", acc.Name, auth.UsageUnsupportedForAccessToken)
 			continue
 		}
 		info, err := auth.QueryUsage(token)
