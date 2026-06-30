@@ -346,6 +346,7 @@ func callUpstream(ctx context.Context, upstreamURL string, body []byte, isStream
 			resetAt, resetSource, accountEmail := rateLimitResetAt(ctx, resp, handle)
 			handle.Manager.MarkFailedUntil(fmt.Errorf("upstream rate limited: %s", message), resetAt)
 			rateLimitedAccounts[handle.Manager] = true
+			notifyUpstreamRateLimitEvent(ctx, handle, accountEmail, resp.StatusCode, message, resetAt)
 
 			if len(rateLimitedAccounts) >= len(auth.Pool.Managers()) {
 				resp.Body = io.NopCloser(bytes.NewReader(respBody))
@@ -438,28 +439,28 @@ func tagUpstreamReset(resp *http.Response, resetAt time.Time) {
 	resp.Header.Set(upstreamResetAtHeader, resetAt.UTC().Format(time.RFC3339))
 }
 
-func notifyUpstreamRateLimit(ctx context.Context, resp *http.Response, message string) {
-	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
-		return
-	}
+func notifyUpstreamRateLimitEvent(ctx context.Context, handle *auth.TokenHandle, accountEmail string, status int, message string, resetAt time.Time) {
 	rateLimitNotifierMu.RLock()
 	notifier := rateLimitNotifier
 	rateLimitNotifierMu.RUnlock()
 	if notifier == nil {
 		return
 	}
-	var resetAt time.Time
-	if value := resp.Header.Get(upstreamResetAtHeader); value != "" {
-		resetAt, _ = time.Parse(time.RFC3339, value)
+	event := UpstreamRateLimitEvent{
+		Status:  status,
+		Message: message,
+		ResetAt: resetAt,
 	}
-	notifier(ctx, UpstreamRateLimitEvent{
-		AccountName:  resp.Header.Get(upstreamAccountHeader),
-		AccountID:    resp.Header.Get(upstreamAccountIDHeader),
-		AccountEmail: resp.Header.Get(upstreamAccountEmailHeader),
-		Status:       resp.StatusCode,
-		Message:      message,
-		ResetAt:      resetAt,
-	})
+	if handle != nil && handle.Manager != nil {
+		event.AccountName = handle.Manager.Name()
+		event.AccountID = handle.AccountID
+		if accountEmail != "" {
+			event.AccountEmail = accountEmail
+		} else {
+			event.AccountEmail = tokenHandleEmail(handle)
+		}
+	}
+	notifier(ctx, event)
 }
 
 // newUUID returns a random RFC-4122 v4 UUID string for the session_id header.
@@ -623,7 +624,6 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
 		recordError(resp.StatusCode, "upstream_error", message)
-		notifyUpstreamRateLimit(r.Context(), resp, message)
 		w.WriteHeader(resp.StatusCode)
 		writeTracked(w, respBody, "chat completion upstream error write failed")
 		return
@@ -701,7 +701,6 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		slog.Error("upstream error",
 			"status", resp.StatusCode,
 			"body", string(respBody[:min(500, len(respBody))]))
-		notifyUpstreamRateLimit(r.Context(), resp, message)
 		writeAnthropicError(w, resp.StatusCode, anthropicErrorType(resp.StatusCode), message)
 		return
 	}
@@ -1850,7 +1849,6 @@ func generateImagesOnce(ctx context.Context, codexReq map[string]interface{}) ([
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		notifyUpstreamRateLimit(ctx, resp, upstreamErrorMessage(respBody))
 		return nil, resp.StatusCode, respBody, nil
 	}
 
@@ -1976,7 +1974,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		respBody, _ := io.ReadAll(resp.Body)
 		message := upstreamErrorMessage(respBody)
 		recordError(resp.StatusCode, "upstream_error", message)
-		notifyUpstreamRateLimit(r.Context(), resp, message)
 		ct := resp.Header.Get("Content-Type")
 		if ct != "" {
 			w.Header().Set("Content-Type", ct)

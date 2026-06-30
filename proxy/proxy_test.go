@@ -1043,6 +1043,7 @@ func TestCallUpstreamFallsBackToAnotherAccountOnRateLimit(t *testing.T) {
 		auth.Pool = oldPool
 		normalClient = oldNormalClient
 		streamClient = oldStreamClient
+		SetRateLimitNotifier(nil)
 	})
 	auth.Pool = auth.NewTokenPool([]auth.AccountConfig{
 		{Name: "a", AuthFile: authFileA},
@@ -1073,6 +1074,11 @@ func TestCallUpstreamFallsBackToAnotherAccountOnRateLimit(t *testing.T) {
 	normalClient = upstream.Client()
 	streamClient = upstream.Client()
 
+	events := make(chan UpstreamRateLimitEvent, 1)
+	SetRateLimitNotifier(func(ctx context.Context, event UpstreamRateLimitEvent) {
+		events <- event
+	})
+
 	resp, err := callUpstream(context.Background(), upstream.URL, []byte(`{"model":"gpt-5"}`), false)
 	if err != nil {
 		t.Fatalf("callUpstream: %v", err)
@@ -1099,9 +1105,21 @@ func TestCallUpstreamFallsBackToAnotherAccountOnRateLimit(t *testing.T) {
 	if until := managers[0].FailedUntil(); time.Until(until) < 100*time.Second {
 		t.Fatalf("account a failedUntil = %s, want about 120s in the future", until)
 	}
+
+	select {
+	case event := <-events:
+		if event.AccountName != "a" || event.AccountID != "acct-a" || event.AccountEmail != "acct-a@example.com" || event.Status != http.StatusTooManyRequests {
+			t.Fatalf("event = %#v", event)
+		}
+		if event.Message != "usage limit reached" {
+			t.Fatalf("message = %q", event.Message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for rate limit event before fallback")
+	}
 }
 
-func TestNotifyUpstreamRateLimitIncludesAccount(t *testing.T) {
+func TestCallUpstreamNotifiesRateLimitIncludesAccount(t *testing.T) {
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "auth-a.json")
 	writeTestAuthFile(t, authFile, "token-a", "refresh-a", "acct-a")
@@ -1139,8 +1157,6 @@ func TestNotifyUpstreamRateLimitIncludesAccount(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
 	}
-	respBody, _ := io.ReadAll(resp.Body)
-	notifyUpstreamRateLimit(context.Background(), resp, upstreamErrorMessage(respBody))
 
 	select {
 	case event := <-events:
