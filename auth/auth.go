@@ -265,13 +265,9 @@ func Login() error {
 }
 
 func LoginWithAccessToken(r io.Reader) error {
-	data, err := io.ReadAll(r)
+	token, err := readAccessToken(r)
 	if err != nil {
-		return fmt.Errorf("failed to read access token: %w", err)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return fmt.Errorf("empty access token")
+		return err
 	}
 
 	authFile := &AuthFile{
@@ -291,6 +287,37 @@ func LoginWithAccessToken(r io.Reader) error {
 	fmt.Println("  ✓ Access token saved")
 	fmt.Printf("  Token saved to %s\n", Manager.filePath)
 	return nil
+}
+
+func readAccessToken(r io.Reader) (string, error) {
+	if f, ok := r.(*os.File); ok {
+		if stat, err := f.Stat(); err == nil && stat.Mode()&os.ModeCharDevice != 0 {
+			fmt.Print("  Paste Codex access token and press Enter: ")
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					return "", fmt.Errorf("failed to read access token: %w", err)
+				}
+				return "", fmt.Errorf("empty access token")
+			}
+			token := strings.TrimSpace(scanner.Text())
+			if token == "" {
+				return "", fmt.Errorf("empty access token")
+			}
+			return token, nil
+		}
+	}
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", fmt.Errorf("failed to read access token: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("empty access token")
+	}
+	return token, nil
 }
 
 func loginBrowser() error {

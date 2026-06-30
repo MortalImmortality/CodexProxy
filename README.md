@@ -151,6 +151,13 @@ With `CODEX_ACCESS_TOKEN` set, `codex-proxy serve` can run without a local auth 
 To persist a Codex access token in the local auth file instead:
 
 ```bash
+codex-proxy login --with-access-token
+# Paste the token when prompted.
+```
+
+For scripts, pipe the token:
+
+```bash
 echo "$CODEX_ACCESS_TOKEN" | codex-proxy login --with-access-token
 ```
 

@@ -86,6 +86,13 @@ export CODEX_ACCESS_TOKEN="<token>"
 也可以把 access token 持久化到本地 auth 文件：
 
 ```bash
+codex-proxy login --with-access-token
+# 按提示粘贴 token，然后回车。
+```
+
+脚本里也可以继续通过管道传入：
+
+```bash
 echo "$CODEX_ACCESS_TOKEN" | codex-proxy login --with-access-token
 ```
 
