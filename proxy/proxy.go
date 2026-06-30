@@ -245,11 +245,10 @@ func Serve(ctx context.Context, host, port string, validateKey KeyValidator) err
 	fmt.Println()
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      withLogging(withCORS(withAuth(validateKey, mux))),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 5 * time.Minute,
-		IdleTimeout:  120 * time.Second,
+		Addr:              addr,
+		Handler:           withLogging(withCORS(withAuth(validateKey, mux))),
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -604,7 +603,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		recordError(resp.StatusCode, "upstream_error", message)
 		notifyUpstreamRateLimit(r.Context(), resp, message)
 		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		writeTracked(w, respBody, "chat completion upstream error write failed")
 		return
 	}
 
@@ -622,7 +621,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		converted := convertToOpenAIFormat(respObj, chatReq)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(converted)
+		writeTracked(w, converted, "chat completion response write failed")
 	}
 }
 
@@ -701,7 +700,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	converted := convertToAnthropicFormat(respObj, clientModel)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(converted)
+	writeTracked(w, converted, "anthropic response write failed")
 }
 
 func anthropicToChatRequest(req map[string]interface{}) map[string]interface{} {
@@ -1783,7 +1782,7 @@ func handleImage(w http.ResponseWriter, r *http.Request, baseModel string, isEdi
 				"body", string(respBody[:min(500, len(respBody))]))
 			recordError(status, "upstream_error", upstreamErrorMessage(respBody))
 			w.WriteHeader(status)
-			w.Write(respBody)
+			writeTracked(w, respBody, "image upstream error write failed")
 			return
 		}
 		if len(batch) == 0 {
@@ -1961,7 +1960,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", ct)
 		}
 		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		writeTracked(w, respBody, "responses upstream error write failed")
 		return
 	}
 
@@ -1976,7 +1975,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(respObj)
+		writeTracked(w, respObj, "responses response write failed")
 	} else {
 		streamPassthrough(w, resp)
 	}
@@ -2748,6 +2747,12 @@ func recordStreamError(logMessage string, err error) {
 	}
 	recordError(status, errType, err.Error())
 	slog.Error(logMessage, "error", err)
+}
+
+func writeTracked(w http.ResponseWriter, body []byte, logMessage string) {
+	if _, err := w.Write(body); err != nil {
+		recordStreamError(logMessage, err)
+	}
 }
 
 func isClientDisconnect(err error) bool {
