@@ -1069,7 +1069,13 @@ func QueryUsageForManager(ctx context.Context, tm *TokenManager) (*UsageInfo, er
 }
 
 func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID string) (*UsageInfo, error) {
-	return queryUsage(ctx, bearerCodexAuth(accessToken, accountID))
+	auth := accessTokenCodexAuth(accessToken, accountID)
+	info, err := queryUsage(ctx, auth)
+	if err != nil && isAgentIdentityToken(accessToken) && strings.Contains(err.Error(), "returned 401") {
+		auth = accessTokenCodexAuth(accessToken, accountID)
+		info, err = queryUsage(ctx, auth)
+	}
+	return info, err
 }
 
 func queryUsage(ctx context.Context, auth codexAuthFunc) (*UsageInfo, error) {
@@ -1129,7 +1135,13 @@ func ResetUsageForManager(ctx context.Context, tm *TokenManager) (*UsageResetRes
 }
 
 func ResetUsageContextWithAccountID(ctx context.Context, accessToken, accountID, idempotencyKey string) (*UsageResetResult, error) {
-	return resetUsage(ctx, bearerCodexAuth(accessToken, accountID), idempotencyKey)
+	auth := accessTokenCodexAuth(accessToken, accountID)
+	result, err := resetUsage(ctx, auth, idempotencyKey)
+	if err != nil && isAgentIdentityToken(accessToken) && strings.Contains(err.Error(), "returned 401") {
+		auth = accessTokenCodexAuth(accessToken, accountID)
+		result, err = resetUsage(ctx, auth, idempotencyKey)
+	}
+	return result, err
 }
 
 func resetUsage(ctx context.Context, auth codexAuthFunc, idempotencyKey string) (*UsageResetResult, error) {
@@ -1434,6 +1446,17 @@ func bearerCodexAuth(accessToken, accountID string) codexAuthFunc {
 		setCodexAuthHeaders(req, accessToken, accountID)
 		return nil
 	}
+}
+
+// accessTokenCodexAuth selects the upstream auth scheme required by the token.
+// Codex agent-identity credentials look like access tokens to the CLI, but the
+// backend rejects them as Bearer tokens and requires AgentAssertion instead.
+func accessTokenCodexAuth(accessToken, accountID string) codexAuthFunc {
+	tm := NewAccessTokenManager("", accessToken, accountID)
+	if tm.IsAgentIdentity() {
+		return tm.codexAuthFunc(accountID)
+	}
+	return bearerCodexAuth(accessToken, accountID)
 }
 
 // codexAuthFunc returns an applier that authenticates as this account, using an
