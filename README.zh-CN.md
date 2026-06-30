@@ -324,7 +324,7 @@ macOS 下 `codex-proxy install` 会为当前用户生成 `~/Library/LaunchAgents
 - Token 存储在 `~/.codex-proxy/auth.json`
 - `CODEX_ACCESS_TOKEN` 直接从环境变量使用，不写入磁盘
 - `codex-proxy login --with-access-token` 会持久化一个没有 refresh_token 的静态 access-token auth 文件
-- 静态 Codex access-token 凭证无法查询 ChatGPT usage，因为 usage 接口需要浏览器 OAuth 凭证
+- 当前 proxy 的旧版 ChatGPT usage 查询不支持静态 Codex access-token 凭证，因为它调用的是浏览器 OAuth usage 接口
 - Token 7 天判定为 stale，5 天时后台主动 refresh
 - 遇到上游 401 自动 refresh-and-retry
 - 静态 access-token 凭证无法 refresh；过期或撤销后需要替换 token

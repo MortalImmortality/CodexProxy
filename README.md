@@ -478,7 +478,7 @@ When `CODEX_ACCESS_TOKEN` is set, it is added as an in-memory account named `cod
 - Token files are written with `0600` permissions.
 - `CODEX_ACCESS_TOKEN` is used directly from the environment and is not written to disk.
 - `codex-proxy login --with-access-token` persists a static `access_token` auth file without a refresh token.
-- ChatGPT usage lookup is unavailable for static Codex access-token credentials because the usage endpoint expects browser OAuth credentials.
+- This proxy's legacy ChatGPT usage lookup is unavailable for static Codex access-token credentials because it calls the browser-OAuth usage endpoint.
 - Tokens are treated as stale after 7 days.
 - Background refresh starts proactively after 5 days.
 - Upstream 401 triggers refresh-and-retry.

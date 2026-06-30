@@ -762,7 +762,7 @@ func DiscoverModels(accessToken string) ([]string, error) {
 
 const (
 	UsageURL                       = "https://chatgpt.com/backend-api/wham/usage"
-	UsageUnsupportedForAccessToken = "usage is unavailable for Codex access token credentials"
+	UsageUnsupportedForAccessToken = "legacy usage lookup is unavailable for Codex access token credentials"
 )
 
 type UsageWindow struct {
