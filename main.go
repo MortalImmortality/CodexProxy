@@ -26,6 +26,9 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version", "-v", "--version":
+		printVersion()
+
 	case "login":
 		loginOpts, err := parseLoginArgs(os.Args[2:])
 		if err != nil {
@@ -130,6 +133,12 @@ func main() {
 	case "usage":
 		if err := cmdUsage(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Invalid usage args: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "upgrade", "update":
+		if err := cmdUpgrade(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Upgrade failed: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -598,10 +607,12 @@ func printUsage() {
 	fmt.Println(`codex-proxy - Codex OAuth API Proxy
 
 Usage:
+  codex-proxy version                                   Show current version
   codex-proxy login [--name NAME]                        Login via browser OAuth
   codex-proxy serve [--host H] [--port P] [--max-body-mb N]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage [--raw]                             Show account rate limit usage
+  codex-proxy upgrade [--version TAG] [--yes]           Upgrade binary from GitHub Releases
   codex-proxy doctor                                     Diagnose deployment configuration
   codex-proxy logout [--name NAME]                       Remove stored credentials
 

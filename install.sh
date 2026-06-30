@@ -83,7 +83,12 @@ info "Using $(go version)"
 
 cd "$REPO_DIR"
 info "Building codex-proxy..."
-CGO_ENABLED=0 go build -trimpath -o codex-proxy .
+BUILD_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+BUILD_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT} -X main.date=${BUILD_DATE}" \
+    -o codex-proxy .
 
 # ── Install binary ─────────────────────────────
 

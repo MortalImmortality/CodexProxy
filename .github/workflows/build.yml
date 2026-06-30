@@ -36,8 +36,11 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
         run: |
-          go build -trimpath -o codex-proxy-${{ matrix.goos }}-${{ matrix.goarch }} .
+          go build -trimpath \
+            -ldflags "-X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o codex-proxy-${{ matrix.goos }}-${{ matrix.goarch }} .
 
       - uses: actions/upload-artifact@v4
         with:

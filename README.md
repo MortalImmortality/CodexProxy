@@ -41,6 +41,7 @@ Any SDK or client that can set a base URL
 - Automatic token refresh, refresh-and-retry on upstream 401, and backoff retry on upstream 429/5xx.
 - Linux systemd user service and macOS launchd user service.
 - Linux one-command installer.
+- In-place binary upgrade from GitHub Releases with `codex-proxy upgrade`.
 - Telegram monitoring bot with status, usage, metrics, models, key, and deployment diagnostics commands.
 - Proactive Telegram alerts for auth health changes, errors, retries, token refreshes, and service exits.
 - Deployment diagnostics with `codex-proxy doctor`.
@@ -75,7 +76,7 @@ Release assets are built for:
 ### Linux one-command install
 
 ```bash
-git clone https://github.com/wangyuyan666/CodexProxy.git
+git clone https://github.com/MortalImmortality/CodexProxy.git
 cd CodexProxy
 ./install.sh
 ```
@@ -97,10 +98,18 @@ codex-proxy start
 codex-proxy status
 ```
 
+To upgrade an installed release binary later:
+
+```bash
+codex-proxy version
+sudo codex-proxy upgrade --yes
+codex-proxy restart
+```
+
 ### Build manually
 
 ```bash
-git clone https://github.com/wangyuyan666/CodexProxy.git
+git clone https://github.com/MortalImmortality/CodexProxy.git
 cd CodexProxy
 go build -o codex-proxy .
 ```
@@ -564,10 +573,12 @@ Keep API key authentication enabled even behind Caddy.
 ## CLI reference
 
 ```bash
+codex-proxy version
 codex-proxy login [--name NAME]
 codex-proxy serve [--host H] [--port P] [--max-body-mb N]
 codex-proxy status
 codex-proxy usage
+codex-proxy upgrade [--version TAG] [--yes]
 codex-proxy doctor
 codex-proxy logout [--name NAME]
 
