@@ -1329,7 +1329,7 @@ func streamAnthropicMessages(w http.ResponseWriter, resp *http.Response, model s
 		return nil
 	})
 	if err != nil && !errors.Is(err, errSSEDone) {
-		slog.Error("anthropic stream read error", "error", err)
+		recordStreamError("anthropic stream error", err)
 	}
 	if !started {
 		_ = startMessage()
@@ -2202,7 +2202,7 @@ func streamChatCompletion(w http.ResponseWriter, resp *http.Response, model stri
 	})
 
 	if err != nil {
-		slog.Error("stream read error", "error", err)
+		recordStreamError("chat completion stream error", err)
 	}
 	if !doneSent {
 		fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -2319,13 +2319,14 @@ func streamPassthrough(w http.ResponseWriter, resp *http.Response) {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				break
+				recordStreamError("passthrough stream write error", werr)
+				return
 			}
 			flusher.Flush()
 		}
 		if err != nil {
 			if err != io.EOF {
-				slog.Error("stream read error", "error", err)
+				recordStreamError("passthrough stream read error", err)
 			}
 			break
 		}
@@ -2733,6 +2734,28 @@ func recordLastError(status int, errType, message string) {
 func recordError(status int, errType, message string) {
 	recordLastError(status, errType, message)
 	stats.errorsTotal.Add(1)
+}
+
+func recordStreamError(logMessage string, err error) {
+	if err == nil || errors.Is(err, errSSEDone) || errors.Is(err, io.EOF) {
+		return
+	}
+	status := http.StatusBadGateway
+	errType := "upstream_stream_error"
+	if isClientDisconnect(err) {
+		status = 499
+		errType = "client_stream_error"
+	}
+	recordError(status, errType, err.Error())
+	slog.Error(logMessage, "error", err)
+}
+
+func isClientDisconnect(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return errors.Is(err, context.Canceled) ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "client disconnected")
 }
 
 func anthropicErrorType(status int) string {

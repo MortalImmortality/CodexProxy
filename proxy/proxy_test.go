@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,26 @@ import (
 
 	"codex-proxy/auth"
 )
+
+type failingStreamWriter struct {
+	header http.Header
+	err    error
+}
+
+func (w *failingStreamWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *failingStreamWriter) WriteHeader(status int) {}
+
+func (w *failingStreamWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func (w *failingStreamWriter) Flush() {}
 
 func TestConvertToOpenAIFormat(t *testing.T) {
 	codexResp := map[string]interface{}{
@@ -117,6 +138,23 @@ func TestWriteErrorIncrementsMetricsWithDetails(t *testing.T) {
 	}
 	if after.LastError.Status != http.StatusBadRequest || after.LastError.Message != "invalid JSON" {
 		t.Fatalf("LastError = %#v", after.LastError)
+	}
+}
+
+func TestRecordStreamErrorTracksBrokenPipe(t *testing.T) {
+	before := SnapshotMetrics()
+
+	recordStreamError("test stream error", errors.New("write: broken pipe"))
+
+	after := SnapshotMetrics()
+	if after.ErrorsTotal != before.ErrorsTotal+1 {
+		t.Fatalf("ErrorsTotal = %d, want %d", after.ErrorsTotal, before.ErrorsTotal+1)
+	}
+	if after.LastError == nil {
+		t.Fatal("LastError is nil")
+	}
+	if after.LastError.Status != 499 || after.LastError.Type != "client_stream_error" {
+		t.Fatalf("LastError = %#v, want client stream 499", after.LastError)
 	}
 }
 
@@ -650,6 +688,64 @@ func TestStreamChatCompletionInitializesToolCallFromAdded(t *testing.T) {
 	}
 	if !strings.Contains(body, `"id":"call_1"`) || !strings.Contains(body, `"name":"get_weather"`) {
 		t.Fatalf("stream missing initial tool call metadata:\n%s", body)
+	}
+}
+
+func TestStreamChatCompletionRecordsWriteError(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"hello"}`,
+		``,
+	}, "\n")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sse))}
+	w := &failingStreamWriter{err: errors.New("write: broken pipe")}
+	before := SnapshotMetrics()
+
+	streamChatCompletion(w, resp, "gpt-5.4-mini", false)
+
+	after := SnapshotMetrics()
+	if after.ErrorsTotal != before.ErrorsTotal+1 {
+		t.Fatalf("ErrorsTotal = %d, want %d", after.ErrorsTotal, before.ErrorsTotal+1)
+	}
+	if after.LastError == nil || after.LastError.Type != "client_stream_error" {
+		t.Fatalf("LastError = %#v, want client stream error", after.LastError)
+	}
+}
+
+func TestStreamAnthropicMessagesRecordsWriteError(t *testing.T) {
+	sse := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1"}}`,
+		``,
+	}, "\n")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sse))}
+	w := &failingStreamWriter{err: errors.New("write: broken pipe")}
+	before := SnapshotMetrics()
+
+	streamAnthropicMessages(w, resp, "claude-sonnet-4")
+
+	after := SnapshotMetrics()
+	if after.ErrorsTotal != before.ErrorsTotal+1 {
+		t.Fatalf("ErrorsTotal = %d, want %d", after.ErrorsTotal, before.ErrorsTotal+1)
+	}
+	if after.LastError == nil || after.LastError.Type != "client_stream_error" {
+		t.Fatalf("LastError = %#v, want client stream error", after.LastError)
+	}
+}
+
+func TestStreamPassthroughRecordsWriteError(t *testing.T) {
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: hello\n\n"))}
+	w := &failingStreamWriter{err: errors.New("write: broken pipe")}
+	before := SnapshotMetrics()
+
+	streamPassthrough(w, resp)
+
+	after := SnapshotMetrics()
+	if after.ErrorsTotal != before.ErrorsTotal+1 {
+		t.Fatalf("ErrorsTotal = %d, want %d", after.ErrorsTotal, before.ErrorsTotal+1)
+	}
+	if after.LastError == nil || after.LastError.Type != "client_stream_error" {
+		t.Fatalf("LastError = %#v, want client stream error", after.LastError)
 	}
 }
 
