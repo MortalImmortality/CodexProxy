@@ -493,12 +493,13 @@ func rateLimitResetAt(ctx context.Context, resp *http.Response, handle *auth.Tok
 	}
 
 	if handle != nil && handle.Token != "" {
-		if handle.Manager != nil && handle.Manager.IsAccessTokenAuth() {
-			return now.Add(5 * time.Minute), "fallback", tokenHandleEmail(handle)
-		}
 		usageCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if info, err := auth.QueryUsageContext(usageCtx, handle.Token); err == nil {
+		if handle.Manager != nil && handle.Manager.IsAccessTokenAuth() {
+			_ = handle.Manager.EnsureAccessTokenMetadata(usageCtx)
+			handle.AccountID = handle.Manager.AccountID()
+		}
+		if info, err := auth.QueryUsageContextWithAccountID(usageCtx, handle.Token, handle.AccountID); err == nil {
 			if resetSecs, ok := usageResetSeconds(info); ok {
 				return now.Add(time.Duration(resetSecs) * time.Second), "usage", info.Email
 			}
@@ -2517,23 +2518,7 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]interface{}, 0, len(managers))
 
 	for _, tm := range managers {
-		token, err := tm.EnsureFreshToken()
-		if err != nil {
-			results = append(results, map[string]interface{}{
-				"account": tm.Name(),
-				"error":   err.Error(),
-			})
-			continue
-		}
-		if tm.IsAccessTokenAuth() {
-			results = append(results, map[string]interface{}{
-				"account":           tm.Name(),
-				"usage_unavailable": true,
-				"reason":            auth.UsageUnsupportedForAccessToken,
-			})
-			continue
-		}
-		info, err := auth.QueryUsage(token)
+		info, err := auth.QueryUsageForManager(r.Context(), tm)
 		if err != nil {
 			results = append(results, map[string]interface{}{
 				"account": tm.Name(),
@@ -2548,6 +2533,12 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 			"allowed":       info.Allowed,
 			"limit_reached": info.LimitHit,
 			"windows":       info.Windows,
+		}
+		if info.TokenActivity != nil {
+			entry["token_activity"] = info.TokenActivity
+		}
+		if info.TokenUsageError != "" {
+			entry["token_usage_error"] = info.TokenUsageError
 		}
 		if until := tm.FailedUntil(); !until.IsZero() && time.Now().Before(until) {
 			entry["available_at"] = until.UTC().Format(time.RFC3339)

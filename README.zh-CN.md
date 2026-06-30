@@ -90,6 +90,8 @@ codex-proxy login --with-access-token
 # 按提示粘贴 token，然后回车。
 ```
 
+登录时会先调用 OpenAI 的账号 metadata 接口验证 token，并保存对应的 ChatGPT account id，后续请求 Codex 后端时会带上这个 account id。
+
 脚本里也可以继续通过管道传入：
 
 ```bash
@@ -188,6 +190,8 @@ codex-proxy usage
 ```
 
 也可通过 HTTP 查询：`GET /usage`
+
+`usage` 同时支持浏览器 OAuth 凭证和 Codex access-token 凭证。access-token 账号会使用已保存或自动发现的 ChatGPT account id 查询 Codex rate limit 和 token activity。
 
 ## Telegram 监控
 
@@ -323,8 +327,8 @@ macOS 下 `codex-proxy install` 会为当前用户生成 `~/Library/LaunchAgents
 
 - Token 存储在 `~/.codex-proxy/auth.json`
 - `CODEX_ACCESS_TOKEN` 直接从环境变量使用，不写入磁盘
-- `codex-proxy login --with-access-token` 会持久化一个没有 refresh_token 的静态 access-token auth 文件
-- 当前 proxy 的旧版 ChatGPT usage 查询不支持静态 Codex access-token 凭证，因为它调用的是浏览器 OAuth usage 接口
+- `codex-proxy login --with-access-token` 会持久化一个没有 refresh_token 的静态 access-token auth 文件，并保存 OpenAI token metadata 返回的 ChatGPT account id
+- access-token 用量查询会发送 `ChatGPT-Account-Id`，并查询 Codex rate limit 和 token activity
 - Token 7 天判定为 stale，5 天时后台主动 refresh
 - 遇到上游 401 自动 refresh-and-retry
 - 静态 access-token 凭证无法 refresh；过期或撤销后需要替换 token

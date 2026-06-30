@@ -2,8 +2,11 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,6 +77,22 @@ func TestAccessTokenManagerUsesStaticToken(t *testing.T) {
 func TestLoginWithAccessTokenPersistsStaticAuthFile(t *testing.T) {
 	oldManager := Manager
 	t.Cleanup(func() { Manager = oldManager })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"email":"user@example.com",
+			"chatgpt_user_id":"user_123",
+			"chatgpt_account_id":"acct_123",
+			"chatgpt_plan_type":"team",
+			"chatgpt_account_is_fedramp":false
+		}`))
+	}))
+	defer server.Close()
+	oldWhoamiURL := AccessTokenWhoamiURL
+	AccessTokenWhoamiURL = server.URL
+	t.Cleanup(func() { AccessTokenWhoamiURL = oldWhoamiURL })
 
 	path := filepath.Join(t.TempDir(), "auth.json")
 	Manager = NewTokenManager("default", path)
@@ -94,6 +113,92 @@ func TestLoginWithAccessTokenPersistsStaticAuthFile(t *testing.T) {
 	}
 	if af.Tokens.RefreshToken != "" {
 		t.Fatalf("RefreshToken = %q, want empty", af.Tokens.RefreshToken)
+	}
+	if af.Tokens.AccountID != "acct_123" {
+		t.Fatalf("AccountID = %q, want acct_123", af.Tokens.AccountID)
+	}
+}
+
+func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
+	var usageSawAccountID, profileSawAccountID bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
+			t.Fatalf("%s Authorization = %q, want bearer token", r.URL.Path, got)
+		}
+		switch r.URL.Path {
+		case "/whoami":
+			_, _ = w.Write([]byte(`{
+				"email":"user@example.com",
+				"chatgpt_user_id":"user_123",
+				"chatgpt_account_id":"acct_123",
+				"chatgpt_plan_type":"team",
+				"chatgpt_account_is_fedramp":false
+			}`))
+		case "/usage":
+			usageSawAccountID = r.Header.Get("ChatGPT-Account-Id") == "acct_123"
+			_, _ = w.Write([]byte(`{
+				"plan_type":"team",
+				"email":"user@example.com",
+				"rate_limit":{
+					"allowed":true,
+					"limit_reached":false,
+					"primary_window":{
+						"used_percent":25,
+						"limit_window_seconds":3600,
+						"reset_after_seconds":1800
+					}
+				}
+			}`))
+		case "/profile":
+			profileSawAccountID = r.Header.Get("ChatGPT-Account-Id") == "acct_123"
+			_, _ = w.Write([]byte(`{
+				"stats":{
+					"lifetime_tokens":12345,
+					"current_streak_days":7,
+					"daily_usage_buckets":[{"start_date":"2026-06-30","tokens":42}]
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	oldWhoamiURL, oldUsageURL, oldProfileURL := AccessTokenWhoamiURL, UsageURL, UsageProfileURL
+	AccessTokenWhoamiURL = server.URL + "/whoami"
+	UsageURL = server.URL + "/usage"
+	UsageProfileURL = server.URL + "/profile"
+	t.Cleanup(func() {
+		AccessTokenWhoamiURL = oldWhoamiURL
+		UsageURL = oldUsageURL
+		UsageProfileURL = oldProfileURL
+	})
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	tm := NewTokenManager("team", path)
+	tm.authFile = &AuthFile{
+		AuthMode:    "access_token",
+		Tokens:      Tokens{AccessToken: "codex-token"},
+		LastRefresh: time.Now(),
+	}
+
+	info, err := QueryUsageForManager(context.Background(), tm)
+	if err != nil {
+		t.Fatalf("QueryUsageForManager: %v", err)
+	}
+	if !usageSawAccountID {
+		t.Fatal("usage request did not include ChatGPT-Account-Id")
+	}
+	if !profileSawAccountID {
+		t.Fatal("profile request did not include ChatGPT-Account-Id")
+	}
+	if tm.AccountID() != "acct_123" {
+		t.Fatalf("AccountID = %q, want acct_123", tm.AccountID())
+	}
+	if info.PlanType != "team" || len(info.Windows) != 1 || info.Windows[0].UsedPercent != 25 {
+		t.Fatalf("usage info = %#v", info)
+	}
+	if info.TokenActivity == nil || info.TokenActivity.Summary.LifetimeTokens == nil || *info.TokenActivity.Summary.LifetimeTokens != 12345 {
+		t.Fatalf("TokenActivity = %#v", info.TokenActivity)
 	}
 }
 

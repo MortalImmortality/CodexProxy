@@ -584,40 +584,21 @@ func cmdUsage(args []string) error {
 	}
 	cfg, err := ensureConfig(defaultConfigPath())
 	if err != nil {
-		token, err := auth.Manager.EnsureFreshToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Cannot get token: %v\n", err)
-			os.Exit(1)
-		}
-		if auth.Manager.IsAccessTokenAuth() {
-			fmt.Printf("  [default] %s\n\n", auth.UsageUnsupportedForAccessToken)
-			return nil
-		}
-		info, err := auth.QueryUsage(token)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Usage query failed: %v\n", err)
-			os.Exit(1)
-		}
-		if opts.raw {
-			fmt.Println(info.RawJSON)
-			return nil
-		}
-		printAccountUsage("default", info)
-		return nil
+		return printUsageForAccounts(opts, defaultPoolAccounts())
 	}
 
-	for _, acc := range cfg.Accounts {
-		tm := auth.NewTokenManager(acc.Name, expandHome(acc.AuthFile))
-		token, err := tm.EnsureFreshToken()
-		if err != nil {
-			fmt.Printf("  [%s] error: %v\n\n", acc.Name, err)
-			continue
+	return printUsageForAccounts(opts, accountsWithEnvAccessToken(configToAccountConfigs(cfg)))
+}
+
+func printUsageForAccounts(opts usageOptions, accounts []auth.AccountConfig) error {
+	for _, acc := range accounts {
+		var tm *auth.TokenManager
+		if acc.AccessToken != "" {
+			tm = auth.NewAccessTokenManager(acc.Name, acc.AccessToken, acc.AccountID)
+		} else {
+			tm = auth.NewTokenManager(acc.Name, expandHome(acc.AuthFile))
 		}
-		if tm.IsAccessTokenAuth() {
-			fmt.Printf("  [%s] %s\n\n", acc.Name, auth.UsageUnsupportedForAccessToken)
-			continue
-		}
-		info, err := auth.QueryUsage(token)
+		info, err := auth.QueryUsageForManager(context.Background(), tm)
 		if err != nil {
 			fmt.Printf("  [%s] usage query failed: %v\n\n", acc.Name, err)
 			continue
@@ -658,6 +639,16 @@ func printAccountUsage(name string, info *auth.UsageInfo) {
 		}
 		resetStr := formatReset(w.ResetSecs)
 		fmt.Printf("    %-8s  [%s] %d%%  (reset: %s)\n", w.Name+":", bar, w.UsedPercent, resetStr)
+	}
+	if info.TokenActivity != nil {
+		if info.TokenActivity.Summary.LifetimeTokens != nil {
+			fmt.Printf("    Tokens:   %d lifetime\n", *info.TokenActivity.Summary.LifetimeTokens)
+		}
+		if info.TokenActivity.Summary.CurrentStreakDays != nil {
+			fmt.Printf("    Streak:   %d days\n", *info.TokenActivity.Summary.CurrentStreakDays)
+		}
+	} else if info.TokenUsageError != "" {
+		fmt.Printf("    Token activity: unavailable (%s)\n", info.TokenUsageError)
 	}
 	fmt.Println()
 }

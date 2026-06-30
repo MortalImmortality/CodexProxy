@@ -155,6 +155,8 @@ codex-proxy login --with-access-token
 # Paste the token when prompted.
 ```
 
+The token is verified with OpenAI's account metadata endpoint at login time so the matching ChatGPT account id can be saved and sent on Codex backend requests.
+
 For scripts, pipe the token:
 
 ```bash
@@ -403,6 +405,8 @@ CLI usage:
 codex-proxy usage
 ```
 
+Usage works for both browser OAuth credentials and Codex access-token credentials. Access-token accounts use the saved or discovered ChatGPT account id when querying Codex rate limits and token activity.
+
 HTTP usage:
 
 ```bash
@@ -477,8 +481,8 @@ When `CODEX_ACCESS_TOKEN` is set, it is added as an in-memory account named `cod
 - `CODEX_HOME` changes the storage directory to `$CODEX_HOME/auth.json`, `$CODEX_HOME/keys.json`, and `$CODEX_HOME/proxy.json`.
 - Token files are written with `0600` permissions.
 - `CODEX_ACCESS_TOKEN` is used directly from the environment and is not written to disk.
-- `codex-proxy login --with-access-token` persists a static `access_token` auth file without a refresh token.
-- This proxy's legacy ChatGPT usage lookup is unavailable for static Codex access-token credentials because it calls the browser-OAuth usage endpoint.
+- `codex-proxy login --with-access-token` persists a static `access_token` auth file without a refresh token, including the ChatGPT account id returned by OpenAI's token metadata endpoint.
+- Access-token usage lookup sends `ChatGPT-Account-Id` and queries Codex rate limits plus token activity.
 - Tokens are treated as stale after 7 days.
 - Background refresh starts proactively after 5 days.
 - Upstream 401 triggers refresh-and-retry.

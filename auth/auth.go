@@ -80,6 +80,14 @@ type Tokens struct {
 	AccountID    string `json:"account_id,omitempty"`
 }
 
+type AccessTokenMetadata struct {
+	Email                 string `json:"email,omitempty"`
+	ChatGPTUserID         string `json:"chatgpt_user_id"`
+	ChatGPTAccountID      string `json:"chatgpt_account_id"`
+	ChatGPTPlanType       string `json:"chatgpt_plan_type"`
+	ChatGPTAccountFedRAMP bool   `json:"chatgpt_account_is_fedramp"`
+}
+
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	IDToken      string `json:"id_token"`
@@ -270,10 +278,16 @@ func LoginWithAccessToken(r io.Reader) error {
 		return err
 	}
 
+	metadata, err := FetchAccessTokenMetadata(context.Background(), token)
+	if err != nil {
+		return fmt.Errorf("access token metadata lookup failed: %w", err)
+	}
+
 	authFile := &AuthFile{
 		AuthMode: "access_token",
 		Tokens: Tokens{
 			AccessToken: token,
+			AccountID:   metadata.ChatGPTAccountID,
 		},
 		LastRefresh: time.Now(),
 	}
@@ -285,6 +299,9 @@ func LoginWithAccessToken(r io.Reader) error {
 	Manager.mu.Unlock()
 
 	fmt.Println("  ✓ Access token saved")
+	if metadata.Email != "" {
+		fmt.Printf("  Account: %s\n", metadata.Email)
+	}
 	fmt.Printf("  Token saved to %s\n", Manager.filePath)
 	return nil
 }
@@ -482,6 +499,42 @@ func (tm *TokenManager) RefreshNow() (string, error) {
 		return "", err
 	}
 	return tm.authFile.Tokens.AccessToken, nil
+}
+
+func (tm *TokenManager) EnsureAccessTokenMetadata(ctx context.Context) error {
+	tm.mu.RLock()
+	if tm.authFile == nil || !isAccessTokenAuth(tm.authFile) || tm.authFile.Tokens.AccountID != "" {
+		tm.mu.RUnlock()
+		return nil
+	}
+	accessToken := tm.authFile.Tokens.AccessToken
+	filePath := tm.filePath
+	tm.mu.RUnlock()
+
+	accountID := accountIDFromJWT(accessToken)
+	if accountID == "" {
+		metadata, err := FetchAccessTokenMetadata(ctx, accessToken)
+		if err != nil {
+			return err
+		}
+		accountID = metadata.ChatGPTAccountID
+	}
+	if accountID == "" {
+		return fmt.Errorf("access token metadata did not include chatgpt_account_id")
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.authFile == nil || !isAccessTokenAuth(tm.authFile) || tm.authFile.Tokens.AccessToken != accessToken {
+		return nil
+	}
+	if tm.authFile.Tokens.AccountID == "" {
+		tm.authFile.Tokens.AccountID = accountID
+		if filePath != "" {
+			return saveAuthFile(tm.authFile, filePath)
+		}
+	}
+	return nil
 }
 
 func (tm *TokenManager) refreshLocked() error {
@@ -760,31 +813,54 @@ func DiscoverModels(accessToken string) ([]string, error) {
 	return models, nil
 }
 
-const (
-	UsageURL                       = "https://chatgpt.com/backend-api/wham/usage"
-	UsageUnsupportedForAccessToken = "legacy usage lookup is unavailable for Codex access token credentials"
+var (
+	AccessTokenWhoamiURL = "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami"
+	UsageURL             = "https://chatgpt.com/backend-api/wham/usage"
+	UsageProfileURL      = "https://chatgpt.com/backend-api/wham/profiles/me"
 )
 
 type UsageWindow struct {
 	Name        string `json:"name"`
 	UsedPercent int    `json:"used_percent"`
 	ResetSecs   int    `json:"reset_after_seconds"`
+	ResetAt     int64  `json:"reset_at,omitempty"`
 	WindowSecs  int    `json:"limit_window_seconds"`
 }
 
+type UsageTokenSummary struct {
+	LifetimeTokens        *int64 `json:"lifetime_tokens,omitempty"`
+	PeakDailyTokens       *int64 `json:"peak_daily_tokens,omitempty"`
+	LongestRunningTurnSec *int64 `json:"longest_running_turn_sec,omitempty"`
+	CurrentStreakDays     *int64 `json:"current_streak_days,omitempty"`
+	LongestStreakDays     *int64 `json:"longest_streak_days,omitempty"`
+}
+
+type UsageDailyBucket struct {
+	StartDate string `json:"start_date"`
+	Tokens    int64  `json:"tokens"`
+}
+
+type UsageTokenActivity struct {
+	Summary      UsageTokenSummary  `json:"summary"`
+	DailyBuckets []UsageDailyBucket `json:"daily_usage_buckets,omitempty"`
+}
+
 type UsageInfo struct {
-	PlanType string        `json:"plan_type"`
-	Email    string        `json:"email"`
-	Allowed  bool          `json:"allowed"`
-	LimitHit bool          `json:"limit_reached"`
-	Windows  []UsageWindow `json:"windows"`
-	RawJSON  string        `json:"-"`
+	PlanType        string              `json:"plan_type"`
+	Email           string              `json:"email"`
+	Allowed         bool                `json:"allowed"`
+	LimitHit        bool                `json:"limit_reached"`
+	Windows         []UsageWindow       `json:"windows"`
+	TokenActivity   *UsageTokenActivity `json:"token_activity,omitempty"`
+	TokenUsageError string              `json:"token_usage_error,omitempty"`
+	RawJSON         string              `json:"-"`
 }
 
 type usageRawWindow struct {
-	UsedPercent     int `json:"used_percent"`
-	LimitWindowSecs int `json:"limit_window_seconds"`
-	ResetAfterSecs  int `json:"reset_after_seconds"`
+	UsedPercent     int   `json:"used_percent"`
+	LimitWindowSecs int   `json:"limit_window_seconds"`
+	ResetAfterSecs  int   `json:"reset_after_seconds"`
+	ResetAt         int64 `json:"reset_at"`
 }
 
 func windowLabel(windowSecs int, fallback string) string {
@@ -807,9 +883,36 @@ func QueryUsage(accessToken string) (*UsageInfo, error) {
 }
 
 func QueryUsageContext(ctx context.Context, accessToken string) (*UsageInfo, error) {
+	return QueryUsageContextWithAccountID(ctx, accessToken, "")
+}
+
+func QueryUsageWithAccountID(accessToken, accountID string) (*UsageInfo, error) {
+	return QueryUsageContextWithAccountID(context.Background(), accessToken, accountID)
+}
+
+func QueryUsageForManager(ctx context.Context, tm *TokenManager) (*UsageInfo, error) {
+	token, err := tm.EnsureFreshToken()
+	if err != nil {
+		return nil, err
+	}
+	if tm.IsAccessTokenAuth() {
+		if err := tm.EnsureAccessTokenMetadata(ctx); err != nil {
+			return nil, fmt.Errorf("access token metadata lookup failed: %w", err)
+		}
+	}
+	info, err := QueryUsageContextWithAccountID(ctx, token, tm.AccountID())
+	if err != nil {
+		return nil, err
+	}
+	if info.Email == "" {
+		info.Email = tm.Email()
+	}
+	return info, nil
+}
+
+func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID string) (*UsageInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", UsageURL, nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", "codex-proxy/1.0")
+	setCodexAuthHeaders(req, accessToken, accountID)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -822,6 +925,22 @@ func QueryUsageContext(ctx context.Context, accessToken string) (*UsageInfo, err
 		return nil, fmt.Errorf("usage query returned %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
 	}
 
+	info, err := parseUsageBody(body)
+	if err != nil {
+		return nil, err
+	}
+	activity, profileRaw, err := QueryTokenActivityContext(ctx, accessToken, accountID)
+	if err == nil {
+		info.TokenActivity = activity
+		info.RawJSON = combineRawUsageJSON(body, profileRaw)
+	} else {
+		info.TokenUsageError = err.Error()
+		info.RawJSON = string(body)
+	}
+	return info, nil
+}
+
+func parseUsageBody(body []byte) (*UsageInfo, error) {
 	var raw struct {
 		PlanType  string `json:"plan_type"`
 		Email     string `json:"email"`
@@ -836,28 +955,226 @@ func QueryUsageContext(ctx context.Context, accessToken string) (*UsageInfo, err
 		return nil, fmt.Errorf("cannot parse usage: %w", err)
 	}
 
-	info := &UsageInfo{PlanType: raw.PlanType, Email: raw.Email, RawJSON: string(body)}
+	info := &UsageInfo{PlanType: raw.PlanType, Email: raw.Email, Allowed: true, RawJSON: string(body)}
 	if raw.RateLimit != nil {
 		info.Allowed = raw.RateLimit.Allowed
 		info.LimitHit = raw.RateLimit.LimitReached
 		if w := raw.RateLimit.PrimaryWindow; w != nil {
-			info.Windows = append(info.Windows, UsageWindow{
-				Name:        windowLabel(w.LimitWindowSecs, "session"),
-				UsedPercent: w.UsedPercent,
-				ResetSecs:   w.ResetAfterSecs,
-				WindowSecs:  w.LimitWindowSecs,
-			})
+			info.Windows = append(info.Windows, usageWindowFromRaw(w, "session"))
 		}
 		if w := raw.RateLimit.SecondaryWindow; w != nil {
-			info.Windows = append(info.Windows, UsageWindow{
-				Name:        windowLabel(w.LimitWindowSecs, "weekly"),
-				UsedPercent: w.UsedPercent,
-				ResetSecs:   w.ResetAfterSecs,
-				WindowSecs:  w.LimitWindowSecs,
-			})
+			info.Windows = append(info.Windows, usageWindowFromRaw(w, "weekly"))
+		}
+	}
+	if len(info.Windows) == 0 {
+		if modern := parseModernUsageBody(body); modern != nil {
+			return modern, nil
 		}
 	}
 	return info, nil
+}
+
+func usageWindowFromRaw(w *usageRawWindow, fallback string) UsageWindow {
+	resetSecs := w.ResetAfterSecs
+	if resetSecs <= 0 && w.ResetAt > 0 {
+		resetSecs = int(time.Until(time.Unix(w.ResetAt, 0)).Seconds())
+		if resetSecs < 0 {
+			resetSecs = 0
+		}
+	}
+	return UsageWindow{
+		Name:        windowLabel(w.LimitWindowSecs, fallback),
+		UsedPercent: w.UsedPercent,
+		ResetSecs:   resetSecs,
+		ResetAt:     w.ResetAt,
+		WindowSecs:  w.LimitWindowSecs,
+	}
+}
+
+type modernUsageWindow struct {
+	UsedPercent        float64 `json:"usedPercent"`
+	WindowDurationMins *int64  `json:"windowDurationMins"`
+	ResetsAt           *int64  `json:"resetsAt"`
+}
+
+type modernRateLimitSnapshot struct {
+	LimitID              string             `json:"limitId"`
+	LimitName            string             `json:"limitName"`
+	PlanType             string             `json:"planType"`
+	RateLimitReachedType string             `json:"rateLimitReachedType"`
+	Primary              *modernUsageWindow `json:"primary"`
+	Secondary            *modernUsageWindow `json:"secondary"`
+}
+
+func parseModernUsageBody(body []byte) *UsageInfo {
+	var raw struct {
+		RateLimits          *modernRateLimitSnapshot            `json:"rateLimits"`
+		RateLimitsByLimitID map[string]*modernRateLimitSnapshot `json:"rateLimitsByLimitId"`
+	}
+	if json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	snapshot := raw.RateLimits
+	if snapshot == nil {
+		if codex := raw.RateLimitsByLimitID["codex"]; codex != nil {
+			snapshot = codex
+		} else {
+			for _, candidate := range raw.RateLimitsByLimitID {
+				snapshot = candidate
+				break
+			}
+		}
+	}
+	if snapshot == nil {
+		return nil
+	}
+	info := &UsageInfo{
+		PlanType: snapshot.PlanType,
+		Allowed:  snapshot.RateLimitReachedType == "",
+		LimitHit: snapshot.RateLimitReachedType != "",
+		RawJSON:  string(body),
+	}
+	if snapshot.Primary != nil {
+		info.Windows = append(info.Windows, usageWindowFromModern(snapshot.Primary, "session"))
+	}
+	if snapshot.Secondary != nil {
+		info.Windows = append(info.Windows, usageWindowFromModern(snapshot.Secondary, "weekly"))
+	}
+	return info
+}
+
+func usageWindowFromModern(w *modernUsageWindow, fallback string) UsageWindow {
+	windowSecs := 0
+	if w.WindowDurationMins != nil {
+		windowSecs = int(*w.WindowDurationMins * 60)
+	}
+	resetAt := int64(0)
+	resetSecs := 0
+	if w.ResetsAt != nil {
+		resetAt = *w.ResetsAt
+		resetSecs = int(time.Until(time.Unix(resetAt, 0)).Seconds())
+		if resetSecs < 0 {
+			resetSecs = 0
+		}
+	}
+	return UsageWindow{
+		Name:        windowLabel(windowSecs, fallback),
+		UsedPercent: int(w.UsedPercent + 0.5),
+		ResetSecs:   resetSecs,
+		ResetAt:     resetAt,
+		WindowSecs:  windowSecs,
+	}
+}
+
+func FetchAccessTokenMetadata(ctx context.Context, accessToken string) (*AccessTokenMetadata, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", AccessTokenWhoamiURL, nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("whoami returned %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
+	}
+	var metadata AccessTokenMetadata
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return nil, fmt.Errorf("cannot parse access token metadata: %w", err)
+	}
+	if metadata.ChatGPTAccountID == "" {
+		return nil, fmt.Errorf("whoami response missing chatgpt_account_id")
+	}
+	return &metadata, nil
+}
+
+func QueryTokenActivityContext(ctx context.Context, accessToken, accountID string) (*UsageTokenActivity, []byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", UsageProfileURL, nil)
+	setCodexAuthHeaders(req, accessToken, accountID)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, body, fmt.Errorf("token activity query returned %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
+	}
+	activity, err := parseTokenActivityBody(body)
+	if err != nil {
+		return nil, body, err
+	}
+	return activity, body, nil
+}
+
+func parseTokenActivityBody(body []byte) (*UsageTokenActivity, error) {
+	var raw struct {
+		Stats *struct {
+			LifetimeTokens        *int64             `json:"lifetime_tokens"`
+			PeakDailyTokens       *int64             `json:"peak_daily_tokens"`
+			LongestRunningTurnSec *int64             `json:"longest_running_turn_sec"`
+			CurrentStreakDays     *int64             `json:"current_streak_days"`
+			LongestStreakDays     *int64             `json:"longest_streak_days"`
+			DailyUsageBuckets     []UsageDailyBucket `json:"daily_usage_buckets"`
+		} `json:"stats"`
+		Summary           *UsageTokenSummary `json:"summary"`
+		DailyUsageBuckets []struct {
+			StartDate string `json:"startDate"`
+			Tokens    int64  `json:"tokens"`
+		} `json:"dailyUsageBuckets"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse token activity: %w", err)
+	}
+	if raw.Stats != nil {
+		return &UsageTokenActivity{
+			Summary: UsageTokenSummary{
+				LifetimeTokens:        raw.Stats.LifetimeTokens,
+				PeakDailyTokens:       raw.Stats.PeakDailyTokens,
+				LongestRunningTurnSec: raw.Stats.LongestRunningTurnSec,
+				CurrentStreakDays:     raw.Stats.CurrentStreakDays,
+				LongestStreakDays:     raw.Stats.LongestStreakDays,
+			},
+			DailyBuckets: raw.Stats.DailyUsageBuckets,
+		}, nil
+	}
+	if raw.Summary != nil {
+		activity := &UsageTokenActivity{Summary: *raw.Summary}
+		for _, bucket := range raw.DailyUsageBuckets {
+			activity.DailyBuckets = append(activity.DailyBuckets, UsageDailyBucket{
+				StartDate: bucket.StartDate,
+				Tokens:    bucket.Tokens,
+			})
+		}
+		return activity, nil
+	}
+	return nil, fmt.Errorf("token activity response missing stats")
+}
+
+func setCodexAuthHeaders(req *http.Request, accessToken, accountID string) {
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", "codex-proxy/1.0")
+	req.Header.Set("Accept", "application/json")
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", accountID)
+	}
+}
+
+func combineRawUsageJSON(usageRaw, profileRaw []byte) string {
+	combined, err := json.MarshalIndent(map[string]json.RawMessage{
+		"rate_limits":    usageRaw,
+		"token_activity": profileRaw,
+	}, "", "  ")
+	if err != nil {
+		return string(usageRaw)
+	}
+	return string(combined)
 }
 
 func BuildCodexRequestBody(chatReq map[string]interface{}) ([]byte, error) {
