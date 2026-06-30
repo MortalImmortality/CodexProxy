@@ -55,8 +55,11 @@ func TestTelegramCommandResponse(t *testing.T) {
 	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/status</code>") {
 		t.Fatalf("/help response = %q", got)
 	}
-	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/key</code>") || !strings.Contains(got, "<code>/doctor</code>") {
+	if got := bot.commandResponse("/help"); !strings.Contains(got, "<code>/key</code>") || !strings.Contains(got, "<code>/doctor</code>") || !strings.Contains(got, "<code>/reset</code>") {
 		t.Fatalf("/help response missing new commands = %q", got)
+	}
+	if got := bot.commandResponse("/reset"); !strings.Contains(got, "<code>/reset account-name</code>") {
+		t.Fatalf("/reset response = %q, want usage", got)
 	}
 	if got := bot.commandResponse("/unknown"); !strings.Contains(got, "未知命令") {
 		t.Fatalf("/unknown response = %q", got)

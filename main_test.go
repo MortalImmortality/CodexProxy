@@ -311,6 +311,19 @@ func TestParseUsageArgs(t *testing.T) {
 	if !opts.raw {
 		t.Fatal("raw = false, want true")
 	}
+	opts, err = parseUsageArgs([]string{"--reset", "--account", "prod"})
+	if err != nil {
+		t.Fatalf("parseUsageArgs reset: %v", err)
+	}
+	if !opts.reset || opts.account != "prod" {
+		t.Fatalf("reset opts = %#v, want account prod", opts)
+	}
+	if _, err := parseUsageArgs([]string{"--reset"}); err == nil {
+		t.Fatal("expected missing account error")
+	}
+	if _, err := parseUsageArgs([]string{"--reset", "--account", "prod", "--raw"}); err == nil {
+		t.Fatal("expected reset/raw conflict error")
+	}
 	if _, err := parseUsageArgs([]string{"--unknown"}); err == nil {
 		t.Fatal("expected unknown flag error")
 	}

@@ -338,6 +338,14 @@ func (b *telegramBot) commandResponseWithContext(ctx context.Context, text strin
 		return telegramMetricsText()
 	case "/usage":
 		return telegramUsageText()
+	case "/reset":
+		resetCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		target := ""
+		if len(fields) > 1 {
+			target = fields[1]
+		}
+		return telegramResetUsageText(resetCtx, target)
 	case "/models":
 		return telegramModelsText()
 	case "/key":
@@ -369,6 +377,7 @@ func telegramHelpText() string {
 		"",
 		"<code>/status</code>   健康状态",
 		"<code>/usage</code>    账号用量",
+		"<code>/reset</code>    手动重置额度",
 		"<code>/metrics</code>  运行指标",
 		"<code>/models</code>   可用模型",
 		"<code>/key</code>      API Key 状态",
@@ -516,6 +525,65 @@ func telegramUsageText() string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func telegramResetUsageText(ctx context.Context, target string) string {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "♻️ <b>手动重置额度</b>\n\n• 用法：<code>/reset account-name</code>\n• 账号名可从 <code>/usage</code> 查看"
+	}
+	tm, label, err := findTelegramResetAccount(ctx, target)
+	if err != nil {
+		return "♻️ <b>手动重置额度</b>\n\n• 状态：⚠️ " + tgEscape(err.Error())
+	}
+	result, err := auth.ResetUsageForManager(ctx, tm)
+	if err != nil {
+		return "♻️ <b>手动重置额度</b>\n\n👤 <b>" + tgEscape(label) + "</b>\n• 状态：⚠️ " + tgEscape(err.Error())
+	}
+	lines := []string{
+		"♻️ <b>手动重置额度</b>",
+		"",
+		"👤 <b>" + tgEscape(label) + "</b>",
+		"• 结果：" + tgEscape(usageResetOutcomeText(result.Outcome)),
+	}
+	if result.Message != "" {
+		lines = append(lines, "• 消息："+tgEscape(result.Message))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func findTelegramResetAccount(ctx context.Context, target string) (*auth.TokenManager, string, error) {
+	var matches []struct {
+		tm    *auth.TokenManager
+		label string
+	}
+	for _, tm := range auth.Pool.Managers() {
+		label := tm.Name()
+		if strings.EqualFold(target, tm.Name()) {
+			matches = append(matches, struct {
+				tm    *auth.TokenManager
+				label string
+			}{tm: tm, label: label})
+			continue
+		}
+		info, err := auth.QueryUsageForManager(ctx, tm)
+		if err == nil && info.Email != "" {
+			label = info.Email
+			if strings.EqualFold(target, info.Email) {
+				matches = append(matches, struct {
+					tm    *auth.TokenManager
+					label string
+				}{tm: tm, label: label})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return nil, "", fmt.Errorf("账号未找到：%s", target)
+	}
+	if len(matches) > 1 {
+		return nil, "", fmt.Errorf("账号匹配不唯一：%s", target)
+	}
+	return matches[0].tm, matches[0].label, nil
 }
 
 func telegramModelsText() string {

@@ -44,8 +44,8 @@ Any SDK or client that can set a base URL
 - Linux systemd user service and macOS launchd user service.
 - Linux one-command installer.
 - In-place binary upgrade from GitHub Releases with `codex-proxy upgrade`.
-- Telegram monitoring bot with status, usage, metrics, models, key, and deployment diagnostics commands.
-- Proactive Telegram alerts for auth health changes, errors, retries, token refreshes, and service exits.
+- Telegram monitoring bot with status, usage, manual quota reset, metrics, models, key, and deployment diagnostics commands.
+- Proactive Telegram alerts for auth health changes, per-account quota exhaustion, errors, retries, token refreshes, and service exits.
 - Deployment diagnostics with `codex-proxy doctor`.
 - CORS enabled for browser clients.
 
@@ -403,9 +403,12 @@ CLI usage:
 
 ```bash
 codex-proxy usage
+codex-proxy usage --reset --account default
 ```
 
 Usage works for both browser OAuth credentials and Codex access-token credentials. Access-token accounts use the saved or discovered ChatGPT account id when querying Codex rate limits and token activity.
+
+Manual reset consumes one official Codex rate-limit reset credit for the named account. Use it only when you explicitly want to reset that account's exhausted quota. A successful reset clears the proxy's local failed-account marker so the account can be selected again immediately.
 
 HTTP usage:
 
@@ -471,7 +474,7 @@ Strategies:
 - `round-robin`
 - `random`
 
-If an account fails with upstream 401, the proxy fails over to another healthy account. Failed accounts are retried after a cooldown. `codex-proxy status` and `codex-proxy usage` include all configured accounts.
+If an account fails with upstream 401, the proxy fails over to another healthy account. If an account receives upstream 429, the proxy marks that account failed until the upstream reset time, sends a Telegram quota alert when configured, and tries another account. Failed accounts are skipped by normal selection until their cooldown expires; if every account is failed, the proxy falls back to trying all configured accounts. `codex-proxy status` and `codex-proxy usage` include all configured accounts.
 
 When `CODEX_ACCESS_TOKEN` is set, it is added as an in-memory account named `codex-access-token` and is tried along with accounts from `proxy.json`. It is not saved to `proxy.json`.
 
@@ -508,6 +511,7 @@ Commands:
 ```text
 /status   Auth and proxy health
 /usage    Account rate-limit usage
+/reset    Manually consume one rate-limit reset credit for an account
 /metrics  Request, error, retry, token refresh, and uptime counters
 /models   Available models
 /key      API key configuration, including full key values
@@ -522,6 +526,7 @@ Telegram messages use HTML formatting with compact headings, bullets, emoji, and
 Proactive alerts are sent for:
 
 - Auth health changing to degraded or recovered.
+- An individual account hitting upstream quota/rate-limit exhaustion.
 - Error counter increases.
 - Upstream retry counter increases.
 - Token refresh counter increases.
@@ -615,6 +620,7 @@ codex-proxy login [--name NAME] [--with-access-token]
 codex-proxy serve [--host H] [--port P] [--max-body-mb N]
 codex-proxy status
 codex-proxy usage
+codex-proxy usage --reset --account NAME
 codex-proxy upgrade [--version TAG] [--yes]
 codex-proxy doctor
 codex-proxy logout [--name NAME]

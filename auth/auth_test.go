@@ -225,6 +225,46 @@ func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
 	}
 }
 
+func TestResetUsageForManagerClearsFailedState(t *testing.T) {
+	var sawAccountID, sawIdempotencyKey bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-token" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		sawAccountID = r.Header.Get("ChatGPT-Account-Id") == "acct_123"
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		sawIdempotencyKey = body["idempotencyKey"] != ""
+		_, _ = w.Write([]byte(`{"outcome":"reset"}`))
+	}))
+	defer server.Close()
+	oldResetURL := UsageResetURL
+	UsageResetURL = server.URL
+	t.Cleanup(func() { UsageResetURL = oldResetURL })
+
+	tm := NewAccessTokenManager("team", "codex-token", "acct_123")
+	tm.MarkFailedUntil(fmt.Errorf("rate limited"), time.Now().Add(time.Hour))
+
+	result, err := ResetUsageForManager(context.Background(), tm)
+	if err != nil {
+		t.Fatalf("ResetUsageForManager: %v", err)
+	}
+	if result.Outcome != "reset" {
+		t.Fatalf("Outcome = %q, want reset", result.Outcome)
+	}
+	if !sawAccountID {
+		t.Fatal("reset request did not include ChatGPT-Account-Id")
+	}
+	if !sawIdempotencyKey {
+		t.Fatal("reset request did not include idempotencyKey")
+	}
+	if tm.IsFailed() {
+		t.Fatal("manager is still failed after reset")
+	}
+}
+
 func TestBuildCodexRequestBody_NonReasoningSamplingParams(t *testing.T) {
 	chatReq := map[string]interface{}{
 		"model":       "gpt-4.1",

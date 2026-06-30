@@ -560,7 +560,9 @@ func defaultMaxBodyMB() (int, error) {
 }
 
 type usageOptions struct {
-	raw bool
+	raw     bool
+	reset   bool
+	account string
 }
 
 func parseUsageArgs(args []string) (usageOptions, error) {
@@ -568,11 +570,19 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.raw, "raw", false, "print raw usage JSON")
+	fs.BoolVar(&opts.reset, "reset", false, "consume one rate-limit reset credit")
+	fs.StringVar(&opts.account, "account", "", "account name to reset")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
+	if opts.reset && opts.raw {
+		return opts, fmt.Errorf("--reset cannot be combined with --raw")
+	}
+	if opts.reset && opts.account == "" {
+		return opts, fmt.Errorf("--reset requires --account NAME")
 	}
 	return opts, nil
 }
@@ -591,13 +601,11 @@ func cmdUsage(args []string) error {
 }
 
 func printUsageForAccounts(opts usageOptions, accounts []auth.AccountConfig) error {
+	if opts.reset {
+		return resetUsageForAccount(opts, accounts)
+	}
 	for _, acc := range accounts {
-		var tm *auth.TokenManager
-		if acc.AccessToken != "" {
-			tm = auth.NewAccessTokenManager(acc.Name, acc.AccessToken, acc.AccountID)
-		} else {
-			tm = auth.NewTokenManager(acc.Name, expandHome(acc.AuthFile))
-		}
+		tm := tokenManagerForAccount(acc)
 		info, err := auth.QueryUsageForManager(context.Background(), tm)
 		if err != nil {
 			fmt.Printf("  [%s] usage query failed: %v\n\n", acc.Name, err)
@@ -610,6 +618,52 @@ func printUsageForAccounts(opts usageOptions, accounts []auth.AccountConfig) err
 		printAccountUsage(acc.Name, info)
 	}
 	return nil
+}
+
+func resetUsageForAccount(opts usageOptions, accounts []auth.AccountConfig) error {
+	for _, acc := range accounts {
+		if acc.Name != opts.account {
+			continue
+		}
+		tm := tokenManagerForAccount(acc)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		result, err := auth.ResetUsageForManager(ctx, tm)
+		if err != nil {
+			return fmt.Errorf("[%s] usage reset failed: %w", acc.Name, err)
+		}
+		fmt.Printf("  [%s] reset outcome: %s\n", acc.Name, usageResetOutcomeText(result.Outcome))
+		if result.Message != "" {
+			fmt.Printf("    %s\n", result.Message)
+		}
+		return nil
+	}
+	return fmt.Errorf("account not found: %s", opts.account)
+}
+
+func tokenManagerForAccount(acc auth.AccountConfig) *auth.TokenManager {
+	if acc.AccessToken != "" {
+		return auth.NewAccessTokenManager(acc.Name, acc.AccessToken, acc.AccountID)
+	}
+	return auth.NewTokenManager(acc.Name, expandHome(acc.AuthFile))
+}
+
+func usageResetOutcomeText(outcome string) string {
+	switch outcome {
+	case "reset":
+		return "reset"
+	case "alreadyRedeemed":
+		return "already redeemed"
+	case "nothingToReset":
+		return "nothing to reset"
+	case "noCredit":
+		return "no reset credit"
+	default:
+		if outcome == "" {
+			return "unknown"
+		}
+		return outcome
+	}
 }
 
 func printAccountUsage(name string, info *auth.UsageInfo) {
@@ -674,6 +728,7 @@ Usage:
   codex-proxy serve [--host H] [--port P] [--max-body-mb N]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage [--raw]                             Show account rate limit usage
+  codex-proxy usage --reset --account NAME              Use one manual rate-limit reset
   codex-proxy upgrade [--version TAG] [--yes]           Upgrade binary from GitHub Releases
   codex-proxy doctor                                     Diagnose deployment configuration
   codex-proxy logout [--name NAME]                       Remove stored credentials

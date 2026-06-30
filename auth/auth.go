@@ -825,6 +825,7 @@ var (
 	AccessTokenWhoamiURL = "https://auth.openai.com/api/accounts/v1/user-auth-credential/whoami"
 	UsageURL             = "https://chatgpt.com/backend-api/wham/usage"
 	UsageProfileURL      = "https://chatgpt.com/backend-api/wham/profiles/me"
+	UsageResetURL        = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 )
 
 type UsageWindow struct {
@@ -862,6 +863,12 @@ type UsageInfo struct {
 	TokenActivity   *UsageTokenActivity `json:"token_activity,omitempty"`
 	TokenUsageError string              `json:"token_usage_error,omitempty"`
 	RawJSON         string              `json:"-"`
+}
+
+type UsageResetResult struct {
+	Outcome string `json:"outcome"`
+	Message string `json:"message,omitempty"`
+	RawJSON string `json:"-"`
 }
 
 type usageRawWindow struct {
@@ -946,6 +953,84 @@ func QueryUsageContextWithAccountID(ctx context.Context, accessToken, accountID 
 		info.RawJSON = string(body)
 	}
 	return info, nil
+}
+
+func ResetUsageForManager(ctx context.Context, tm *TokenManager) (*UsageResetResult, error) {
+	token, err := tm.EnsureFreshToken()
+	if err != nil {
+		return nil, err
+	}
+	if tm.IsAccessTokenAuth() {
+		if err := tm.EnsureAccessTokenMetadata(ctx); err != nil {
+			return nil, fmt.Errorf("access token metadata lookup failed: %w", err)
+		}
+	}
+	result, err := ResetUsageContextWithAccountID(ctx, token, tm.AccountID(), newIdempotencyKey())
+	if err != nil {
+		return nil, err
+	}
+	if result.Outcome == "reset" || result.Outcome == "alreadyRedeemed" {
+		tm.ClearFailed()
+	}
+	return result, nil
+}
+
+func ResetUsageContextWithAccountID(ctx context.Context, accessToken, accountID, idempotencyKey string) (*UsageResetResult, error) {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil, fmt.Errorf("idempotency key is required")
+	}
+	body, err := json.Marshal(map[string]string{"idempotencyKey": idempotencyKey})
+	if err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", UsageResetURL, strings.NewReader(string(body)))
+	setCodexAuthHeaders(req, accessToken, accountID)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("usage reset returned %d: %s", resp.StatusCode, string(respBody[:min(200, len(respBody))]))
+	}
+	result := parseUsageResetBody(respBody)
+	result.RawJSON = string(respBody)
+	return result, nil
+}
+
+func parseUsageResetBody(body []byte) *UsageResetResult {
+	var raw struct {
+		Outcome string `json:"outcome"`
+		Result  string `json:"result"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &raw) != nil {
+		return &UsageResetResult{Outcome: "unknown", Message: strings.TrimSpace(string(body))}
+	}
+	outcome := raw.Outcome
+	if outcome == "" {
+		outcome = raw.Result
+	}
+	if outcome == "" {
+		outcome = raw.Status
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	return &UsageResetResult{Outcome: outcome, Message: raw.Message}
+}
+
+func newIdempotencyKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func parseUsageBody(body []byte) (*UsageInfo, error) {
