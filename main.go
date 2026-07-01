@@ -153,6 +153,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "reset":
+		if err := cmdReset(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid reset args: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "upgrade", "update":
 		if err := cmdUpgrade(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Upgrade failed: %v\n", err)
@@ -566,9 +572,11 @@ func defaultMaxBodyMB() (int, error) {
 }
 
 type usageOptions struct {
-	raw     bool
-	reset   bool
-	account string
+	raw bool
+}
+
+type resetOptions struct {
+	target string
 }
 
 func parseUsageArgs(args []string) (usageOptions, error) {
@@ -576,21 +584,31 @@ func parseUsageArgs(args []string) (usageOptions, error) {
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&opts.raw, "raw", false, "print raw usage JSON")
-	fs.BoolVar(&opts.reset, "reset", false, "consume one rate-limit reset credit")
-	fs.StringVar(&opts.account, "account", "", "account name to reset")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 	if fs.NArg() != 0 {
 		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	if opts.reset && opts.raw {
-		return opts, fmt.Errorf("--reset cannot be combined with --raw")
-	}
-	if opts.reset && opts.account == "" {
-		return opts, fmt.Errorf("--reset requires --account NAME")
-	}
 	return opts, nil
+}
+
+func parseResetArgs(args []string) (resetOptions, error) {
+	opts := resetOptions{}
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	switch fs.NArg() {
+	case 0:
+		return opts, nil
+	case 1:
+		opts.target = fs.Arg(0)
+		return opts, nil
+	default:
+		return opts, fmt.Errorf("unexpected arguments: %v", fs.Args())
+	}
 }
 
 func cmdUsage(args []string) error {
@@ -598,18 +616,30 @@ func cmdUsage(args []string) error {
 	if err != nil {
 		return err
 	}
+	return printUsageForAccounts(opts, usageAccounts())
+}
+
+func cmdReset(args []string) error {
+	opts, err := parseResetArgs(args)
+	if err != nil {
+		return err
+	}
+	accounts := usageAccounts()
+	if opts.target != "" {
+		return resetUsageForAccount(opts.target, accounts)
+	}
+	return printResetCreditsForAccounts(opts, accounts)
+}
+
+func usageAccounts() []auth.AccountConfig {
 	cfg, err := ensureConfig(defaultConfigPath())
 	if err != nil {
-		return printUsageForAccounts(opts, defaultPoolAccounts())
+		return defaultPoolAccounts()
 	}
-
-	return printUsageForAccounts(opts, accountsWithEnvAccessToken(configToAccountConfigs(cfg)))
+	return accountsWithEnvAccessToken(configToAccountConfigs(cfg))
 }
 
 func printUsageForAccounts(opts usageOptions, accounts []auth.AccountConfig) error {
-	if opts.reset {
-		return resetUsageForAccount(opts, accounts)
-	}
 	for _, acc := range accounts {
 		tm := tokenManagerForAccount(acc)
 		info, err := auth.QueryUsageForManager(context.Background(), tm)
@@ -626,25 +656,81 @@ func printUsageForAccounts(opts usageOptions, accounts []auth.AccountConfig) err
 	return nil
 }
 
-func resetUsageForAccount(opts usageOptions, accounts []auth.AccountConfig) error {
+func printResetCreditsForAccounts(opts resetOptions, accounts []auth.AccountConfig) error {
+	found := false
 	for _, acc := range accounts {
-		if acc.Name != opts.account {
+		if opts.target != "" && acc.Name != opts.target {
 			continue
 		}
+		found = true
 		tm := tokenManagerForAccount(acc)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		result, err := auth.ResetUsageForManager(ctx, tm)
+		info, err := auth.QueryUsageForManager(context.Background(), tm)
 		if err != nil {
-			return fmt.Errorf("[%s] usage reset failed: %w", acc.Name, err)
+			fmt.Printf("  [%s] reset credits query failed: %v\n\n", acc.Name, err)
+			continue
 		}
-		fmt.Printf("  [%s] reset outcome: %s\n", acc.Name, usageResetOutcomeText(result.Outcome))
-		if result.Message != "" {
-			fmt.Printf("    %s\n", result.Message)
+		label := acc.Name
+		if info.Email != "" {
+			label = info.Email
 		}
-		return nil
+		fmt.Printf("  [%s]\n", label)
+		fmt.Printf("    Reset credits: %s\n\n", formatResetCredits(info.ResetCredits))
 	}
-	return fmt.Errorf("account not found: %s", opts.account)
+	if opts.target != "" && !found {
+		return fmt.Errorf("account not found: %s", opts.target)
+	}
+	return nil
+}
+
+func resetUsageForAccount(target string, accounts []auth.AccountConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	acc, label, err := findResetAccount(ctx, target, accounts)
+	if err != nil {
+		return err
+	}
+	tm := tokenManagerForAccount(acc)
+	result, err := auth.ResetUsageForManager(ctx, tm)
+	if err != nil {
+		return fmt.Errorf("[%s] usage reset failed: %w", label, err)
+	}
+	fmt.Printf("  [%s] reset outcome: %s\n", label, usageResetOutcomeText(result.Outcome))
+	if result.Message != "" {
+		fmt.Printf("    %s\n", result.Message)
+	}
+	return nil
+}
+
+func findResetAccount(ctx context.Context, target string, accounts []auth.AccountConfig) (auth.AccountConfig, string, error) {
+	for _, acc := range accounts {
+		if strings.EqualFold(target, acc.Name) {
+			return acc, acc.Name, nil
+		}
+	}
+
+	var matches []struct {
+		acc   auth.AccountConfig
+		label string
+	}
+	for _, acc := range accounts {
+		tm := tokenManagerForAccount(acc)
+		info, err := auth.QueryUsageForManager(ctx, tm)
+		if err != nil || info.Email == "" || !strings.EqualFold(target, info.Email) {
+			continue
+		}
+		matches = append(matches, struct {
+			acc   auth.AccountConfig
+			label string
+		}{acc: acc, label: info.Email})
+	}
+	if len(matches) == 0 {
+		return auth.AccountConfig{}, "", fmt.Errorf("account not found: %s", target)
+	}
+	if len(matches) > 1 {
+		return auth.AccountConfig{}, "", fmt.Errorf("account match is ambiguous: %s", target)
+	}
+	return matches[0].acc, matches[0].label, nil
 }
 
 func tokenManagerForAccount(acc auth.AccountConfig) *auth.TokenManager {
@@ -684,6 +770,7 @@ func printAccountUsage(name string, info *auth.UsageInfo) {
 	fmt.Printf("  [%s]\n", label)
 	fmt.Printf("    Plan:     %s\n", info.PlanType)
 	fmt.Printf("    Status:   %s\n", status)
+	fmt.Printf("    Resets:   %s available\n", formatResetCredits(info.ResetCredits))
 	if len(info.Windows) == 0 {
 		fmt.Printf("    (no rate limit windows)\n")
 	}
@@ -713,6 +800,13 @@ func printAccountUsage(name string, info *auth.UsageInfo) {
 	fmt.Println()
 }
 
+func formatResetCredits(credits *int) string {
+	if credits == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", *credits)
+}
+
 func formatReset(secs int) string {
 	if secs <= 0 {
 		return "-"
@@ -734,7 +828,7 @@ Usage:
   codex-proxy serve [--host H] [--port P] [--max-body-mb N]  Start proxy (foreground)
   codex-proxy status                                     Show auth & service status
   codex-proxy usage [--raw]                             Show account rate limit usage
-  codex-proxy usage --reset --account NAME              Use one manual rate-limit reset
+  codex-proxy reset [ACCOUNT_OR_EMAIL]                  Show or use rate-limit reset credits
   codex-proxy upgrade [--version TAG] [--yes]           Upgrade binary from GitHub Releases
   codex-proxy doctor                                     Diagnose deployment configuration
   codex-proxy logout [--name NAME]                       Remove stored credentials

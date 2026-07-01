@@ -403,12 +403,13 @@ CLI usage:
 
 ```bash
 codex-proxy usage
-codex-proxy usage --reset --account default
+codex-proxy reset
+codex-proxy reset user@example.com
 ```
 
 Usage works for both browser OAuth credentials and Codex access-token credentials. Access-token accounts use the saved or discovered ChatGPT account id when querying Codex rate limits and token activity.
 
-Manual reset consumes one official Codex rate-limit reset credit for the named account. Use it only when you explicitly want to reset that account's exhausted quota. A successful reset clears the proxy's local failed-account marker so the account can be selected again immediately.
+`codex-proxy reset` is read-only by default and shows each account's available Codex rate-limit reset credits. Passing one account name or email, such as `codex-proxy reset user@example.com`, consumes one official Codex rate-limit reset credit for that account. Use it only when you explicitly want to reset that account's exhausted quota. A successful reset clears the proxy's local failed-account marker so the account can be selected again immediately.
 
 HTTP usage:
 
@@ -620,7 +621,8 @@ codex-proxy login [--name NAME] [--with-access-token]
 codex-proxy serve [--host H] [--port P] [--max-body-mb N]
 codex-proxy status
 codex-proxy usage
-codex-proxy usage --reset --account NAME
+codex-proxy reset
+codex-proxy reset ACCOUNT_OR_EMAIL
 codex-proxy upgrade [--version TAG] [--yes]
 codex-proxy doctor
 codex-proxy logout [--name NAME]

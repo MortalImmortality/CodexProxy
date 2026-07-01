@@ -209,6 +209,7 @@ func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
 			_, _ = w.Write([]byte(`{
 				"plan_type":"team",
 				"email":"user@example.com",
+				"rateLimitResetCredits":{"availableCount":2},
 				"rate_limit":{
 					"allowed":true,
 					"limit_reached":false,
@@ -270,6 +271,9 @@ func TestQueryUsageForAccessTokenManagerHydratesAccountID(t *testing.T) {
 	if info.TokenActivity == nil || info.TokenActivity.Summary.LifetimeTokens == nil || *info.TokenActivity.Summary.LifetimeTokens != 12345 {
 		t.Fatalf("TokenActivity = %#v", info.TokenActivity)
 	}
+	if info.ResetCredits == nil || *info.ResetCredits != 2 {
+		t.Fatalf("ResetCredits = %v, want 2", info.ResetCredits)
+	}
 }
 
 func TestQueryUsageForAccessTokenManagerContinuesWhenWhoamiRejectsTokenType(t *testing.T) {
@@ -287,6 +291,7 @@ func TestQueryUsageForAccessTokenManagerContinuesWhenWhoamiRejectsTokenType(t *t
 			_, _ = w.Write([]byte(`{
 				"plan_type":"team",
 				"email":"user@example.com",
+				"rateLimitResetCredits":{"available_count":1},
 				"rate_limit":{
 					"allowed":true,
 					"limit_reached":false,
@@ -328,6 +333,33 @@ func TestQueryUsageForAccessTokenManagerContinuesWhenWhoamiRejectsTokenType(t *t
 	}
 	if info.PlanType != "team" || len(info.Windows) != 1 || info.Windows[0].UsedPercent != 25 {
 		t.Fatalf("usage info = %#v", info)
+	}
+	if info.ResetCredits == nil || *info.ResetCredits != 1 {
+		t.Fatalf("ResetCredits = %v, want 1", info.ResetCredits)
+	}
+}
+
+func TestParseModernUsageBodyIncludesResetCredits(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour).Unix()
+	body := []byte(fmt.Sprintf(`{
+		"rateLimitsByLimitId":{
+			"codex":{
+				"planType":"plus",
+				"primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":%d}
+			}
+		},
+		"rateLimitResetCredits":{"availableCount":3}
+	}`, resetAt))
+
+	info, err := parseUsageBody(body)
+	if err != nil {
+		t.Fatalf("parseUsageBody: %v", err)
+	}
+	if info.PlanType != "plus" || len(info.Windows) != 1 || info.Windows[0].UsedPercent != 42 {
+		t.Fatalf("usage info = %#v", info)
+	}
+	if info.ResetCredits == nil || *info.ResetCredits != 3 {
+		t.Fatalf("ResetCredits = %v, want 3", info.ResetCredits)
 	}
 }
 
@@ -371,6 +403,43 @@ func TestResetUsageForManagerClearsFailedState(t *testing.T) {
 	}
 	if tm.IsFailed() {
 		t.Fatal("manager is still failed after reset")
+	}
+}
+
+func TestResetUsageForOAuthManager(t *testing.T) {
+	var sawBearer, sawRedeemRequestID bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawBearer = r.Header.Get("Authorization") == "Bearer oauth-token"
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		sawRedeemRequestID = body["redeem_request_id"] != ""
+		_, _ = w.Write([]byte(`{"outcome":"reset"}`))
+	}))
+	defer server.Close()
+	oldResetURL := UsageResetURL
+	UsageResetURL = server.URL
+	t.Cleanup(func() { UsageResetURL = oldResetURL })
+
+	tm := NewTokenManager("default", filepath.Join(t.TempDir(), "auth.json"))
+	tm.authFile = &AuthFile{
+		Tokens:      Tokens{AccessToken: "oauth-token"},
+		LastRefresh: time.Now(),
+	}
+
+	result, err := ResetUsageForManager(context.Background(), tm)
+	if err != nil {
+		t.Fatalf("ResetUsageForManager: %v", err)
+	}
+	if result.Outcome != "reset" {
+		t.Fatalf("Outcome = %q, want reset", result.Outcome)
+	}
+	if !sawBearer {
+		t.Fatal("reset request did not use OAuth bearer token")
+	}
+	if !sawRedeemRequestID {
+		t.Fatal("reset request did not include redeem_request_id")
 	}
 }
 

@@ -511,6 +511,7 @@ func telegramUsageText() string {
 		lines = append(lines, fmt.Sprintf("👤 <b>%s</b>", tgEscape(label)))
 		lines = append(lines, fmt.Sprintf("• 状态：%s", status))
 		lines = append(lines, fmt.Sprintf("• 计划：%s", tgEscape(info.PlanType)))
+		lines = append(lines, fmt.Sprintf("• Reset credits：%s", tgEscape(formatResetCredits(info.ResetCredits))))
 		if until := tm.FailedUntil(); !until.IsZero() && time.Now().Before(until) {
 			lines = append(lines, "• 预计恢复："+tgEscape(until.Local().Format("2006-01-02 15:04:05 MST")))
 		}

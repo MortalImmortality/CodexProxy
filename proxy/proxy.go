@@ -2560,6 +2560,9 @@ func handleUsage(w http.ResponseWriter, r *http.Request) {
 			"limit_reached": info.LimitHit,
 			"windows":       info.Windows,
 		}
+		if info.ResetCredits != nil {
+			entry["reset_credits_available"] = *info.ResetCredits
+		}
 		if info.TokenActivity != nil {
 			entry["token_activity"] = info.TokenActivity
 		}

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -311,23 +314,84 @@ func TestParseUsageArgs(t *testing.T) {
 	if !opts.raw {
 		t.Fatal("raw = false, want true")
 	}
-	opts, err = parseUsageArgs([]string{"--reset", "--account", "prod"})
-	if err != nil {
-		t.Fatalf("parseUsageArgs reset: %v", err)
-	}
-	if !opts.reset || opts.account != "prod" {
-		t.Fatalf("reset opts = %#v, want account prod", opts)
-	}
 	if _, err := parseUsageArgs([]string{"--reset"}); err == nil {
-		t.Fatal("expected missing account error")
-	}
-	if _, err := parseUsageArgs([]string{"--reset", "--account", "prod", "--raw"}); err == nil {
-		t.Fatal("expected reset/raw conflict error")
+		t.Fatal("expected removed reset flag error")
 	}
 	if _, err := parseUsageArgs([]string{"--unknown"}); err == nil {
 		t.Fatal("expected unknown flag error")
 	}
 	if _, err := parseUsageArgs([]string{"extra"}); err == nil {
 		t.Fatal("expected unexpected positional arg error")
+	}
+}
+
+func TestParseResetArgs(t *testing.T) {
+	opts, err := parseResetArgs(nil)
+	if err != nil {
+		t.Fatalf("parseResetArgs defaults: %v", err)
+	}
+	if opts.target != "" {
+		t.Fatalf("default reset opts = %#v, want read-only all accounts", opts)
+	}
+
+	opts, err = parseResetArgs([]string{"user@example.com"})
+	if err != nil {
+		t.Fatalf("parseResetArgs target: %v", err)
+	}
+	if opts.target != "user@example.com" {
+		t.Fatalf("target opts = %#v, want user@example.com", opts)
+	}
+
+	if _, err := parseResetArgs([]string{"--consume"}); err == nil {
+		t.Fatal("expected removed consume flag error")
+	}
+	if _, err := parseResetArgs([]string{"--unknown"}); err == nil {
+		t.Fatal("expected unknown flag error")
+	}
+	if _, err := parseResetArgs([]string{"one", "two"}); err == nil {
+		t.Fatal("expected too many positional args error")
+	}
+}
+
+func TestFindResetAccountMatchesAccessTokenEmail(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/whoami":
+			_, _ = w.Write([]byte(`{
+				"email":"user@example.com",
+				"chatgpt_account_id":"acct_123"
+			}`))
+		case "/usage":
+			_, _ = w.Write([]byte(`{
+				"plan_type":"team",
+				"email":"user@example.com",
+				"rate_limit":{"allowed":true,"limit_reached":false}
+			}`))
+		case "/profile":
+			_, _ = w.Write([]byte(`{"stats":{"lifetime_tokens":123}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldWhoamiURL, oldUsageURL, oldProfileURL := auth.AccessTokenWhoamiURL, auth.UsageURL, auth.UsageProfileURL
+	auth.AccessTokenWhoamiURL = server.URL + "/whoami"
+	auth.UsageURL = server.URL + "/usage"
+	auth.UsageProfileURL = server.URL + "/profile"
+	t.Cleanup(func() {
+		auth.AccessTokenWhoamiURL = oldWhoamiURL
+		auth.UsageURL = oldUsageURL
+		auth.UsageProfileURL = oldProfileURL
+	})
+
+	acc, label, err := findResetAccount(context.Background(), "user@example.com", []auth.AccountConfig{
+		{Name: "token", AccessToken: "codex-token"},
+	})
+	if err != nil {
+		t.Fatalf("findResetAccount: %v", err)
+	}
+	if acc.Name != "token" || label != "user@example.com" {
+		t.Fatalf("match = (%#v, %q), want token user@example.com", acc, label)
 	}
 }

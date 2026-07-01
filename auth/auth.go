@@ -1000,6 +1000,7 @@ type UsageInfo struct {
 	Allowed         bool                `json:"allowed"`
 	LimitHit        bool                `json:"limit_reached"`
 	Windows         []UsageWindow       `json:"windows"`
+	ResetCredits    *int                `json:"reset_credits_available,omitempty"`
 	TokenActivity   *UsageTokenActivity `json:"token_activity,omitempty"`
 	TokenUsageError string              `json:"token_usage_error,omitempty"`
 	RawJSON         string              `json:"-"`
@@ -1214,12 +1215,16 @@ func parseUsageBody(body []byte) (*UsageInfo, error) {
 			PrimaryWindow   *usageRawWindow `json:"primary_window"`
 			SecondaryWindow *usageRawWindow `json:"secondary_window"`
 		} `json:"rate_limit"`
+		RateLimitResetCredits *rateLimitResetCredits `json:"rateLimitResetCredits"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("cannot parse usage: %w", err)
 	}
 
 	info := &UsageInfo{PlanType: raw.PlanType, Email: raw.Email, Allowed: true, RawJSON: string(body)}
+	if raw.RateLimitResetCredits != nil {
+		info.ResetCredits = raw.RateLimitResetCredits.availableCount()
+	}
 	if raw.RateLimit != nil {
 		info.Allowed = raw.RateLimit.Allowed
 		info.LimitHit = raw.RateLimit.LimitReached
@@ -1236,6 +1241,21 @@ func parseUsageBody(body []byte) (*UsageInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+type rateLimitResetCredits struct {
+	AvailableCount      *int `json:"availableCount"`
+	AvailableCountSnake *int `json:"available_count"`
+}
+
+func (c *rateLimitResetCredits) availableCount() *int {
+	if c == nil {
+		return nil
+	}
+	if c.AvailableCount != nil {
+		return c.AvailableCount
+	}
+	return c.AvailableCountSnake
 }
 
 func usageWindowFromRaw(w *usageRawWindow, fallback string) UsageWindow {
@@ -1272,8 +1292,9 @@ type modernRateLimitSnapshot struct {
 
 func parseModernUsageBody(body []byte) *UsageInfo {
 	var raw struct {
-		RateLimits          *modernRateLimitSnapshot            `json:"rateLimits"`
-		RateLimitsByLimitID map[string]*modernRateLimitSnapshot `json:"rateLimitsByLimitId"`
+		RateLimits            *modernRateLimitSnapshot            `json:"rateLimits"`
+		RateLimitsByLimitID   map[string]*modernRateLimitSnapshot `json:"rateLimitsByLimitId"`
+		RateLimitResetCredits *rateLimitResetCredits              `json:"rateLimitResetCredits"`
 	}
 	if json.Unmarshal(body, &raw) != nil {
 		return nil
@@ -1297,6 +1318,9 @@ func parseModernUsageBody(body []byte) *UsageInfo {
 		Allowed:  snapshot.RateLimitReachedType == "",
 		LimitHit: snapshot.RateLimitReachedType != "",
 		RawJSON:  string(body),
+	}
+	if raw.RateLimitResetCredits != nil {
+		info.ResetCredits = raw.RateLimitResetCredits.availableCount()
 	}
 	if snapshot.Primary != nil {
 		info.Windows = append(info.Windows, usageWindowFromModern(snapshot.Primary, "session"))
