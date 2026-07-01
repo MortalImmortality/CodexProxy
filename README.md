@@ -274,7 +274,7 @@ Manage file-backed keys:
 ```bash
 codex-proxy key add [--name NAME] [--key KEY]
 codex-proxy key list
-codex-proxy key delete <key-or-name>
+codex-proxy key delete <key-or-name|--empty-name>
 ```
 
 `CODEX_PROXY_API_KEY` is useful for single-key container or service deployments. `keys.json` is better when you need multiple keys.
@@ -627,7 +627,7 @@ codex-proxy logout [--name NAME]
 
 codex-proxy key add [--name NAME] [--key KEY]
 codex-proxy key list
-codex-proxy key delete <key-or-name>
+codex-proxy key delete <key-or-name|--empty-name>
 
 codex-proxy install
 codex-proxy start

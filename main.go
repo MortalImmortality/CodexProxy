@@ -75,18 +75,24 @@ func main() {
 		defer auth.Pool.Stop()
 		startConfigReloader(ctx, configPath)
 
+		var extraKeys []APIKey
 		ks, err := loadKeys()
 		if err != nil {
 			slog.Error("failed to load API keys", "error", err)
 			os.Exit(1)
 		}
 		if envKey := os.Getenv("CODEX_PROXY_API_KEY"); envKey != "" {
-			ks.Keys = append(ks.Keys, APIKey{Key: envKey, Name: "env"})
+			extraKeys = append(extraKeys, APIKey{Key: envKey, Name: "env"})
 		}
-		if len(ks.Keys) == 0 {
+		if len(ks.Keys)+len(extraKeys) == 0 {
 			slog.Warn("no API keys configured — all requests will be rejected until keys are added via 'codex-proxy key add'")
 		}
-		validateKey := proxy.KeyValidator(ks.ValidKey)
+		keyValidator, err := newReloadingKeyValidator(extraKeys)
+		if err != nil {
+			slog.Error("failed to initialize API key validator", "error", err)
+			os.Exit(1)
+		}
+		validateKey := proxy.KeyValidator(keyValidator.ValidKey)
 
 		telegram := startTelegramMonitor(ctx)
 		if telegram != nil {
@@ -736,7 +742,7 @@ Usage:
 API key management:
   codex-proxy key add [--name NAME] [--key KEY]          Add API key (auto-generate if no --key)
   codex-proxy key list                                   List all API keys
-  codex-proxy key delete <key-or-name>                   Delete an API key
+  codex-proxy key delete <key-or-name|--empty-name>      Delete an API key
 
 Service management:
   codex-proxy install                  Install user service (systemd/launchd)

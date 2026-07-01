@@ -170,7 +170,7 @@ const resp = await client.chat.completions.create({
 ```bash
 codex-proxy key add [--name NAME] [--key KEY]    # 添加 key（不指定则自动生成）
 codex-proxy key list                              # 列出所有 key
-codex-proxy key delete <key-or-name>              # 按 key 或 name 删除
+codex-proxy key delete <key-or-name|--empty-name> # 按 key、name 或空 name 删除
 ```
 
 Key 存储在 `~/.codex-proxy/keys.json`。也支持 `CODEX_PROXY_API_KEY` 环境变量。
@@ -318,7 +318,7 @@ codex-proxy logout [--name NAME]                   # 删除凭证
 
 codex-proxy key add [--name N] [--key K]           # 添加 API key
 codex-proxy key list                               # 列出 API key
-codex-proxy key delete <key-or-name>               # 删除 API key
+codex-proxy key delete <key-or-name|--empty-name>  # 删除 API key
 
 codex-proxy install                                # 安装用户服务（Linux systemd / macOS launchd）
 codex-proxy start / stop / restart / logs          # 服务管理
