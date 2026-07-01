@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -239,12 +240,19 @@ func startConfigReloader(ctx context.Context, configPath string) {
 		defer ticker.Stop()
 
 		lastSignature, _ := poolConfigSignature(configPath)
+		lastResetEvent := time.Time{}
 		for {
 			select {
 			case <-ctx.Done():
 				slog.Info("config reloader stopped")
 				return
 			case <-ticker.C:
+				var err error
+				lastResetEvent, err = clearFailedAccountsFromResetEvents(lastResetEvent)
+				if err != nil {
+					slog.Warn("reset event replay skipped", "error", err)
+				}
+
 				signature, err := poolConfigSignature(configPath)
 				if err != nil {
 					slog.Warn("proxy config reload skipped", "config", configPath, "error", err)
@@ -699,6 +707,9 @@ func resetUsageForAccount(target string, accounts []auth.AccountConfig) error {
 	if result.Message != "" {
 		fmt.Printf("    %s\n", result.Message)
 	}
+	if err := recordResetEvent(acc, label); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: reset succeeded but failed to notify running service: %v\n", err)
+	}
 	return nil
 }
 
@@ -731,6 +742,97 @@ func findResetAccount(ctx context.Context, target string, accounts []auth.Accoun
 		return auth.AccountConfig{}, "", fmt.Errorf("account match is ambiguous: %s", target)
 	}
 	return matches[0].acc, matches[0].label, nil
+}
+
+type resetEvent struct {
+	AccountName string    `json:"account_name"`
+	Email       string    `json:"email,omitempty"`
+	AuthFile    string    `json:"auth_file,omitempty"`
+	Time        time.Time `json:"time"`
+}
+
+func resetEventsPath() string {
+	return filepath.Join(authStorageDir(), "reset-events.jsonl")
+}
+
+func recordResetEvent(acc auth.AccountConfig, label string) error {
+	event := resetEvent{
+		AccountName: acc.Name,
+		Time:        time.Now().UTC(),
+	}
+	if acc.AuthFile != "" {
+		event.AuthFile = cleanPath(acc.AuthFile)
+	}
+	if strings.Contains(label, "@") {
+		event.Email = label
+	}
+	if err := os.MkdirAll(authStorageDir(), 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(resetEventsPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func clearFailedAccountsFromResetEvents(after time.Time) (time.Time, error) {
+	if auth.Pool == nil {
+		return after, nil
+	}
+	data, err := os.ReadFile(resetEventsPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return after, nil
+		}
+		return after, err
+	}
+
+	latest := after
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event resetEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if !event.Time.After(after) {
+			continue
+		}
+		if event.Time.After(latest) {
+			latest = event.Time
+		}
+		for _, tm := range auth.Pool.Managers() {
+			if resetEventMatchesManager(event, tm) {
+				tm.ClearFailed()
+				slog.Info("account restored after reset event", "account", tm.Name())
+			}
+		}
+	}
+	return latest, nil
+}
+
+func resetEventMatchesManager(event resetEvent, tm *auth.TokenManager) bool {
+	if tm == nil {
+		return false
+	}
+	if event.AccountName != "" && strings.EqualFold(event.AccountName, tm.Name()) {
+		return true
+	}
+	if event.AuthFile != "" && tm.FilePath() != "" && cleanPath(event.AuthFile) == cleanPath(tm.FilePath()) {
+		return true
+	}
+	return false
 }
 
 func tokenManagerForAccount(acc auth.AccountConfig) *auth.TokenManager {

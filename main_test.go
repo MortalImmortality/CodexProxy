@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"codex-proxy/auth"
 )
@@ -393,5 +395,34 @@ func TestFindResetAccountMatchesAccessTokenEmail(t *testing.T) {
 	}
 	if acc.Name != "token" || label != "user@example.com" {
 		t.Fatalf("match = (%#v, %q), want token user@example.com", acc, label)
+	}
+}
+
+func TestResetEventRestoresFailedPoolAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	authFile := filepath.Join(home, "auth.json")
+	accounts := []auth.AccountConfig{{Name: "default", AuthFile: authFile}}
+	oldPool := auth.Pool
+	auth.Pool = auth.NewTokenPool(accounts, "round-robin")
+	t.Cleanup(func() { auth.Pool = oldPool })
+
+	managers := auth.Pool.Managers()
+	if len(managers) != 1 {
+		t.Fatalf("managers = %d, want 1", len(managers))
+	}
+	managers[0].MarkFailedUntil(fmt.Errorf("rate limited"), time.Now().Add(time.Hour))
+	if !managers[0].IsFailed() {
+		t.Fatal("manager should start failed")
+	}
+
+	if err := recordResetEvent(accounts[0], "default"); err != nil {
+		t.Fatalf("recordResetEvent: %v", err)
+	}
+	if _, err := clearFailedAccountsFromResetEvents(time.Time{}); err != nil {
+		t.Fatalf("clearFailedAccountsFromResetEvents: %v", err)
+	}
+	if managers[0].IsFailed() {
+		t.Fatal("manager should be restored after reset event")
 	}
 }
